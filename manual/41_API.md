@@ -164,6 +164,14 @@ curl -X PUT https://mojefirma.example/api/v1/settings/supplier/invoice-counter \
   -d '{ "type": "invoice", "next_number": 42 }'
 # → { "type": "invoice", "next_number": 42, "counter": 41,
 #     "period": "202607", "preview": "2607042" }
+
+# GET vrátí stav counterů všech tří řad v aktuálním období (bez inkrementu);
+# null = typ nemá šablonu, "has_counter": false = šablona bez {C+} (fixní číslo)
+curl https://mojefirma.example/api/v1/settings/supplier/invoice-counter \
+  -H "Authorization: Bearer $TOKEN"
+# → { "invoice":     { "next_number": 42, "period": "202607",
+#                      "preview": "2607042", "has_counter": true },
+#     "proforma":    { … }, "credit_note": { … } }
 ```
 
 Counter jde i **snížit**; pokud by nové číslo kolidovalo s už vystaveným

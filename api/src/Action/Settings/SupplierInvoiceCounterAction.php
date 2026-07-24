@@ -29,6 +29,10 @@ use Psr\Http\Message\ServerRequestInterface as Request;
  *
  * Response: { "type": "invoice", "next_number": 42, "counter": 41,
  *             "period": "202607", "preview": "2607042" }
+ *
+ * GET /api/settings/supplier/invoice-counter — stav counterů všech řad (admin).
+ * Response: { "invoice": {next_number, period, preview, has_counter} | null, "proforma": …, "credit_note": … }
+ * (null = typ nemá template; slouží UI v Nastavení → Číslování faktur.)
  */
 final class SupplierInvoiceCounterAction
 {
@@ -37,6 +41,28 @@ final class SupplierInvoiceCounterAction
         private readonly ActivityLogger $logger,
         private readonly IpMatcher $ipMatcher,
     ) {}
+
+    /** GET — stav counterů všech tří řad pro aktuální období (pro UI v Nastavení). */
+    public function status(Request $request, Response $response): Response
+    {
+        $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
+        if (($user['role'] ?? '') !== 'admin') {
+            return Json::error($response, 'forbidden', 'Pouze admin.', 403);
+        }
+
+        $supplierId = (int) $request->getAttribute(SupplierScopeMiddleware::ATTR_CURRENT_ID, 0);
+        if ($supplierId <= 0) {
+            return Json::error($response, 'no_supplier', 'Není zvolen dodavatel.', 400);
+        }
+
+        $out = [];
+        foreach (['invoice', 'proforma', 'credit_note'] as $type) {
+            $status = $this->varsymbol->counterStatus($supplierId, $type);
+            $out[$type] = $status['preview'] === '' ? null : $status;
+        }
+
+        return Json::ok($response, $out);
+    }
 
     public function __invoke(Request $request, Response $response): Response
     {

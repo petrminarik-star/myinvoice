@@ -591,9 +591,25 @@ export type PdfSignatureOutputSettingPayload = Partial<Pick<
   'enabled' | 'backend' | 'selection_source' | 'user_profile_fallback' | 'default_profile_id' | 'failure_policy' | 'signature_config'
 >>
 
+/** Stav counteru číselné řady (GET /settings/supplier/invoice-counter). null = typ nemá template. */
+export type InvoiceCounterType = 'invoice' | 'proforma' | 'credit_note'
+export interface InvoiceCounterStatus {
+  next_number: number
+  period: string
+  preview: string
+  /** false = template bez {C+} — číslo je fixní, counter nedává smysl. */
+  has_counter: boolean
+}
+export type InvoiceCounterStatusMap = Record<InvoiceCounterType, InvoiceCounterStatus | null>
+
 export const settingsApi = {
   getSupplier: () => api.get<Supplier>('/settings/supplier').then(r => r.data),
   updateSupplier: (payload: Partial<Supplier>) => api.put<Supplier>('/settings/supplier', payload).then(r => r.data),
+  getInvoiceCounters: () => api.get<InvoiceCounterStatusMap>('/settings/supplier/invoice-counter').then(r => r.data),
+  setInvoiceCounter: (type: InvoiceCounterType, next_number: number) =>
+    api.put<{ type: InvoiceCounterType; next_number: number; counter: number; period: string; preview: string }>(
+      '/settings/supplier/invoice-counter', { type, next_number },
+    ).then(r => r.data),
 
   listCurrencies: () => api.get<CurrencyAccount[]>('/settings/currencies').then(r => r.data),
   createCurrency: (payload: Partial<CurrencyAccount>) =>

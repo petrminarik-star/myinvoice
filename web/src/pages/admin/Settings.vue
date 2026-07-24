@@ -2,7 +2,7 @@
 import { ref, onMounted, computed, watch } from 'vue'
 import DateInput from '@/components/ui/DateInput.vue'
 import { useI18n } from 'vue-i18n'
-import { settingsApi, type Supplier, type SelfCopyType, type SelfCopyMode } from '@/api/settings'
+import { settingsApi, type Supplier, type SelfCopyType, type SelfCopyMode, type InvoiceCounterType, type InvoiceCounterStatusMap } from '@/api/settings'
 import { adminApi, type SampleDataStatus } from '@/api/admin'
 import { clientsApi } from '@/api/clients'
 import { useSupplierStore } from '@/stores/supplier'
@@ -163,6 +163,38 @@ function selfCopyFallbackLabel(ct: SelfCopyType): string {
   return lbl(fb[ct])
 }
 
+// ── Startovací číslo číselné řady — stav counterů + inline editace (per typ) ──
+const COUNTER_TYPES: InvoiceCounterType[] = ['invoice', 'proforma', 'credit_note']
+const counters = ref<InvoiceCounterStatusMap | null>(null)
+const counterEdit = ref<Record<InvoiceCounterType, boolean>>({ invoice: false, proforma: false, credit_note: false })
+const counterDraft = ref<Record<InvoiceCounterType, number | null>>({ invoice: null, proforma: null, credit_note: null })
+
+async function loadCounters() {
+  try {
+    counters.value = await settingsApi.getInvoiceCounters()
+  } catch {
+    counters.value = null  // 403 (ne-admin) / starší backend → ovládání se nezobrazí
+  }
+}
+
+function toggleCounterEdit(type: InvoiceCounterType) {
+  counterEdit.value[type] = !counterEdit.value[type]
+  if (counterEdit.value[type]) counterDraft.value[type] = counters.value?.[type]?.next_number ?? 1
+}
+
+async function saveCounter(type: InvoiceCounterType) {
+  const n = counterDraft.value[type]
+  if (!n || !Number.isInteger(n) || n < 1) { toast.error(t('settings.counter_invalid')); return }
+  try {
+    await settingsApi.setInvoiceCounter(type, n)
+    counterEdit.value[type] = false
+    await loadCounters()
+    toast.success(t('settings.counter_saved'))
+  } catch (e: any) {
+    toast.error(e?.response?.data?.error?.message || t('common.error'))
+  }
+}
+
 async function load() {
   loading.value = true
   try {
@@ -170,6 +202,7 @@ async function load() {
     bumpPreview()
   } finally { loading.value = false }
   loadSampleStatus()
+  loadCounters()
 }
 
 onMounted(load)
@@ -651,6 +684,31 @@ async function removeLogo() {
               </p>
               <p v-else class="text-xs text-neutral-400 mt-1">{{ t('settings.numbering_preview') }}: {{ t('settings.numbering_preview_fallback') }}</p>
               <p class="text-xs text-neutral-400 mt-1">{{ t('settings.purchase_invoice_number_format_hint') }}</p>
+            </div>
+          </div>
+          <!-- Startovací číslo řady — stav counterů + nastavení (GET/PUT invoice-counter) -->
+          <div v-if="counters" class="mt-4 pt-4 border-t border-neutral-100">
+            <h4 class="text-xs font-semibold text-neutral-600 mb-1">{{ t('settings.counter_section') }}</h4>
+            <p class="text-xs text-neutral-400 mb-2">{{ t('settings.counter_hint') }}</p>
+            <div class="space-y-1.5">
+              <div v-for="ct in COUNTER_TYPES" :key="ct">
+                <div v-if="counters[ct]?.has_counter" class="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span class="w-28 text-xs text-neutral-500">{{ t(`type.${ct}`) }}</span>
+                  <code class="text-sm font-mono font-semibold">{{ counters[ct]?.preview }}</code>
+                  <template v-if="!counterEdit[ct]">
+                    <button type="button" @click="toggleCounterEdit(ct)"
+                      class="cursor-pointer text-xs text-primary-600 hover:underline">{{ t('common.edit') }}</button>
+                  </template>
+                  <template v-else>
+                    <input v-model.number="counterDraft[ct]" type="number" min="1" max="999999999"
+                      class="w-28 h-8 px-2 border border-neutral-300 rounded-md text-sm font-mono" />
+                    <button type="button" @click="saveCounter(ct)"
+                      class="cursor-pointer h-8 px-3 bg-primary-600 hover:bg-primary-700 text-white text-xs font-medium rounded-md">{{ t('settings.counter_set') }}</button>
+                    <button type="button" @click="counterEdit[ct] = false"
+                      class="cursor-pointer h-8 px-2 text-xs text-neutral-500 hover:text-neutral-700">{{ t('common.cancel') }}</button>
+                  </template>
+                </div>
+              </div>
             </div>
           </div>
         </div>

@@ -2262,6 +2262,35 @@ paths:
           content:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
+    get:
+      tags: [Settings]
+      summary: Stav counterů číselných řad
+      description: |
+        Aktuální stav supplier-wide counterů všech tří řad (invoice / proforma /
+        credit_note) v aktuálním období: jaké pořadové číslo a číslo dokladu
+        dostane **příští vystavený doklad** — bez inkrementu counteru.
+
+        `null` u typu, který nemá šablonu číslování. `has_counter = false`
+        znamená šablonu bez counter placeholderu (`{C+}`) — číslo je fixní
+        a nastavování counteru nemá smysl.
+      parameters:
+        - $ref: '#/components/parameters/SupplierIdHeader'
+      responses:
+        '200':
+          description: Stav counterů per typ dokladu
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invoice: { $ref: '#/components/schemas/InvoiceCounterStatus' }
+                  proforma: { $ref: '#/components/schemas/InvoiceCounterStatus' }
+                  credit_note: { $ref: '#/components/schemas/InvoiceCounterStatus' }
+        '403':
+          description: Uživatel není admin
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /api/v1/settings/supplier/logo:
     parameters:
@@ -5221,6 +5250,25 @@ components:
           schema: { $ref: '#/components/schemas/Error' }
 
   schemas:
+    InvoiceCounterStatus:
+      type: [object, 'null']
+      description: Stav counteru jedné číselné řady; null = typ nemá šablonu číslování.
+      properties:
+        next_number:
+          type: integer
+          example: 42
+          description: Pořadové číslo, které dostane příští vystavený doklad.
+        period:
+          type: string
+          example: "202607"
+          description: Klíč období counteru (YYYY / YYYYMM / ALL).
+        preview:
+          type: string
+          example: "2607042"
+          description: Jak bude vypadat číslo příštího vystaveného dokladu.
+        has_counter:
+          type: boolean
+          description: false = šablona bez {C+} — číslo je fixní, counter nemá smysl.
     OssPreview:
       type: object
       required: [period, settings, state, summary, countries, corrections, warnings]

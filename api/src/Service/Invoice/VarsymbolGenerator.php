@@ -354,6 +354,47 @@ final class VarsymbolGenerator
     }
 
     /**
+     * Aktuální stav supplier-wide counteru pro UI (bez inkrementu): jaké pořadové
+     * číslo a varsymbol dostane příští vystavený doklad daného typu v období
+     * daném $for. `has_counter = false` u template bez {C+} — číslo je fixní
+     * a nastavování counteru nemá smysl (UI ovládání skryje).
+     *
+     * @return array{next_number:int, period:string, preview:string, has_counter:bool}
+     * @throws \InvalidArgumentException nepodporovaný typ
+     */
+    public function counterStatus(int $supplierId, string $invoiceType, ?\DateTimeInterface $for = null): array
+    {
+        if ($invoiceType === 'tax_document') {
+            $invoiceType = 'invoice'; // sdílená řada s fakturami (viz next())
+        }
+        if ($supplierId <= 0 || !in_array($invoiceType, self::SUPPORTED_TYPES, true)) {
+            throw new \InvalidArgumentException("Nepodporovaný typ pro varsymbol: {$invoiceType}");
+        }
+
+        [$template, $period] = $this->resolveTemplateAndPeriod($supplierId, $invoiceType, 0);
+        if ($template === '') {
+            return ['next_number' => 0, 'period' => '', 'preview' => '', 'has_counter' => false];
+        }
+
+        $for       = $for ?? new \DateTimeImmutable('today');
+        $periodKey = $this->makePeriodKey($period, $for);
+
+        $stmt = $this->db->pdo()->prepare(
+            'SELECT last_number FROM invoice_counters
+              WHERE supplier_id = ? AND client_id = 0 AND invoice_type = ? AND period = ?'
+        );
+        $stmt->execute([$supplierId, $invoiceType, $periodKey]);
+        $current = (int) ($stmt->fetchColumn() ?: 0);
+
+        return [
+            'next_number' => $current + 1,
+            'period'      => $periodKey,
+            'preview'     => $this->render($template, $for, $current + 1),
+            'has_counter' => $this->hasCounterPlaceholder($template),
+        ];
+    }
+
+    /**
      * Pokud je daná faktura "poslední" ve své counter scope (její varsymbol odpovídá
      * aktuální hodnotě counteru), dekrementuj counter — to umožní, aby další vystavená
      * faktura ve stejné scope dostala stejné číslo.

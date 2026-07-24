@@ -145,6 +145,29 @@ final class VarsymbolSetCounterTest extends TestCase
         self::assertSame($this->gen->render($this->template, $this->date, 8), $next);
     }
 
+    public function testCounterStatusReflectsSetCounterWithoutIncrement(): void
+    {
+        $this->gen->setCounter($this->supplierId, 'invoice', 42, $this->date);
+
+        $status = $this->gen->counterStatus($this->supplierId, 'invoice', $this->date);
+        self::assertSame(42, $status['next_number']);
+        self::assertSame($this->gen->render($this->template, $this->date, 42), $status['preview']);
+        self::assertTrue($status['has_counter']);
+
+        // Opakované čtení nesmí counter posunout (na rozdíl od next()).
+        $again = $this->gen->counterStatus($this->supplierId, 'invoice', $this->date);
+        self::assertSame(42, $again['next_number']);
+
+        // next() pak skutečně vydá číslo ze statusu.
+        self::assertSame($status['preview'], $this->gen->next($this->supplierId, 'invoice', $this->date));
+    }
+
+    public function testCounterStatusRejectsUnsupportedType(): void
+    {
+        $this->expectException(\InvalidArgumentException::class);
+        $this->gen->counterStatus($this->supplierId, 'nonsense', $this->date);
+    }
+
     public function testSetCounterRejectsInvalidInput(): void
     {
         $this->expectException(\InvalidArgumentException::class);

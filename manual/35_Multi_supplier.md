@@ -164,6 +164,22 @@ s chybou „Chybí counter".
   immutable `varsymbol`.
 - V editoru konceptu můžeš číslo přepsat ručně — viz [§ 10.2.5](10_Faktura_editor.md#1025-cislo-dokladu-rucni-override-volitelne).
 
+**Startovací číslo řady (převzetí rozjeté řady):**
+
+Pod šablonami je blok **Příští číslo dokladu** — pro fakturu, zálohovou
+i dobropis ukazuje, jaké číslo dostane příští vystavený doklad v aktuálním
+období řady. Tlačítkem **Upravit** nastavíš vlastní pořadové číslo (část
+`{C+}` šablony, ne celé číslo dokladu) — typicky při přechodu z jiného
+fakturačního systému, kde řada už běží (poslední faktura jinde skončila
+na `…041` → zadej `42`).
+
+- Nastavení platí pro **aktuální období** řady (dle cyklu resetu výše).
+- Counter jde i **snížit**; kolizi s už vystaveným dokladem Vystavení samo
+  přeskočí na první volné číslo — duplicitní číslo nikdy nevznikne.
+- U šablony bez counteru (`{C+}`) se ovládání nezobrazuje — číslo je fixní.
+- Totéž umí veřejné API (`GET`/`PUT /api/v1/settings/supplier/invoice-counter`)
+  — viz [§ 41](41_API.md).
+
 ### 35.5.4 Kopie odchozích e-mailů dodavateli
 
 Sekce **Kopie odchozích e-mailů na e-mail dodavatele** v nastavení dodavatele.
