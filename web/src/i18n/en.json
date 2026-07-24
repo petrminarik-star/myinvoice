@@ -1150,6 +1150,7 @@
     "of": "of", "from": "From", "to": "To", "ok": "OK", "saving": "Saving…", "select_all": "Select all", "unset": "not set",
     "deleting": "Deleting…", "saved": "Saved.", "deleted": "Deleted.", "created": "Created.",
     "remove": "Remove", "refresh": "Refresh",
+    "date_placeholder": "DD.MM.YYYY", "open_calendar": "Open calendar",
     "warning": "Warning", "error": "Error", "success": "Done",
     "active": "Active", "inactive": "Inactive",
     "default": "Default", "yes_short": "✓", "no_short": "—",

@@ -1150,6 +1150,7 @@
     "of": "z", "from": "Od", "to": "Do", "ok": "OK", "saving": "Ukládám…", "select_all": "Vybrat vše", "unset": "nevyplněno",
     "deleting": "Mažu…", "saved": "Uloženo.", "deleted": "Smazáno.", "created": "Vytvořeno.",
     "remove": "Odebrat", "refresh": "Obnovit",
+    "date_placeholder": "DD.MM.RRRR", "open_calendar": "Otevřít kalendář",
     "warning": "Pozor", "error": "Chyba", "success": "Hotovo",
     "active": "Aktivní", "inactive": "Neaktivní",
     "default": "Výchozí", "yes_short": "✓", "no_short": "—",
