@@ -100,6 +100,15 @@ final class CronCatalog
                 'requires_config' => 'purchase_invoice.inbox_dir',
             ],
             [
+                'script' => 'cron-wallet-sync',
+                'recommended' => 'every_30_min',
+                'linux_cron' => '10,40 * * * *',
+                'windows_schtasks' => '/sc minute /mo 30',
+                'max_age_hours' => 4,
+                'weekdays_only' => false,
+                'critical' => false,
+            ],
+            [
                 'script' => 'cron-send-reminders',
                 'recommended' => 'weekdays_0900',
                 'linux_cron' => '0 9 * * 1-5',

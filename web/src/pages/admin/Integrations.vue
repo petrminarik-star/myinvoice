@@ -2,7 +2,7 @@
 import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { integrationsApi,
-  type IdokladCredentialsStatus, type FakturoidCredentialsStatus,
+  type IdokladCredentialsStatus, type FakturoidCredentialsStatus, type WalletCredentialsStatus,
   type AnthropicCredentialsStatus, type AiExtractResult, type ImportJob } from '@/api/integrations'
 import { useRouter, useRoute } from 'vue-router'
 import { useToast } from '@/composables/useToast'
@@ -12,13 +12,13 @@ import { purchaseInvoicesApi, type PurchaseDocumentKind } from '@/api/purchaseIn
 const { t } = useI18n()
 const toast = useToast()
 
-type Tab = 'idoklad' | 'fakturoid' | 'ai'
+type Tab = 'idoklad' | 'fakturoid' | 'wallet' | 'ai'
 // Tab z ?tab=... query (default idoklad). Watch pro proklik mezi sidebar položkami
 // "Externí integrace" (no query) ↔ "AI import" (?tab=ai).
 const route = useRoute()
 function readTabFromQuery(): Tab {
   const q = String(route.query.tab ?? '')
-  return q === 'fakturoid' || q === 'ai' ? q as Tab : 'idoklad'
+  return q === 'fakturoid' || q === 'wallet' || q === 'ai' ? q as Tab : 'idoklad'
 }
 const tab = ref<Tab>(readTabFromQuery())
 watch(() => route.query.tab, () => {
@@ -160,6 +160,120 @@ const progressPercent = computed(() => {
   if (!currentJob.value || !currentJob.value.total_items) return null
   return Math.round((currentJob.value.processed / currentJob.value.total_items) * 100)
 })
+
+// ── Wallet (BudgetBakers) state ───────────────────────────────────────
+const walletStatus = ref<WalletCredentialsStatus | null>(null)
+const walletToken = ref('')
+const walletSaving = ref(false)
+const walletTestMsg = ref<{ ok: boolean; text: string } | null>(null)
+const showWalletToken = ref(false)
+
+async function loadWalletStatus() {
+  try {
+    walletStatus.value = await integrationsApi.getWalletCreds()
+  } catch (e) {
+    toast.error(apiErrorMessage(e))
+  }
+}
+
+async function saveWalletCreds() {
+  if (!walletToken.value.trim()) {
+    toast.error(t('integrations.wallet.token_required'))
+    return
+  }
+  walletSaving.value = true
+  walletTestMsg.value = null
+  try {
+    const r = await integrationsApi.setWalletCreds(walletToken.value.trim())
+    if (r.test_ok) {
+      walletTestMsg.value = {
+        ok: true,
+        text: r.sync_in_progress
+          ? t('integrations.wallet.test_sync_in_progress')
+          : t('integrations.wallet.test_success', { n: r.accounts ?? 0 }),
+      }
+      walletToken.value = ''  // clear sensitive field
+      await loadWalletStatus()
+    } else {
+      walletTestMsg.value = { ok: false, text: r.test_error || 'Test connectivity selhal' }
+    }
+  } catch (e) {
+    walletTestMsg.value = { ok: false, text: apiErrorMessage(e) }
+  } finally {
+    walletSaving.value = false
+  }
+}
+
+async function deleteWalletCreds() {
+  if (!confirm(t('integrations.wallet.delete_confirm'))) return
+  try {
+    await integrationsApi.deleteWalletCreds()
+    walletStatus.value = null
+    walletToken.value = ''
+    walletTestMsg.value = null
+    toast.success(t('integrations.wallet.deleted'))
+  } catch (e) {
+    toast.error(apiErrorMessage(e))
+  }
+}
+
+// ── Wallet import job state ───────────────────────────────────────────
+const walletParams = ref({
+  include_bank_accounts: true,
+  include_bank_transactions: true,
+  incremental: false,
+  dry_run: false,
+})
+const walletJob = ref<ImportJob | null>(null)
+const walletStarting = ref(false)
+let walletPollTimer: ReturnType<typeof setInterval> | null = null
+
+async function startWalletImport() {
+  if (walletStarting.value) return
+  walletStarting.value = true
+  try {
+    const r = await integrationsApi.startWallet(walletParams.value)
+    toast.success(t('integrations.wallet.started', { jobId: r.job_id }))
+    await pollWalletJob(r.job_id)
+  } catch (e: any) {
+    toast.error(apiErrorMessage(e))
+  } finally {
+    walletStarting.value = false
+  }
+}
+
+async function pollWalletJob(jobId: number) {
+  walletJob.value = await integrationsApi.getJob(jobId)
+  if (walletPollTimer) clearInterval(walletPollTimer)
+  walletPollTimer = setInterval(async () => {
+    if (!walletJob.value) return
+    try {
+      walletJob.value = await integrationsApi.getJob(jobId)
+      if (['completed', 'failed', 'cancelled'].includes(walletJob.value.status)) {
+        if (walletPollTimer) clearInterval(walletPollTimer)
+        walletPollTimer = null
+      }
+    } catch (e) {
+      if (walletPollTimer) clearInterval(walletPollTimer)
+      walletPollTimer = null
+    }
+  }, 2000)
+}
+
+async function deleteWalletJob() {
+  if (!walletJob.value) return
+  try {
+    await integrationsApi.deleteJob(walletJob.value.id)
+    if (walletPollTimer) { clearInterval(walletPollTimer); walletPollTimer = null }
+    walletJob.value = null
+  } catch (e) {
+    toast.error(apiErrorMessage(e))
+  }
+}
+
+const isWalletJobRunning = computed(() =>
+  walletJob.value && ['queued', 'running'].includes(walletJob.value.status)
+)
 
 // ── Fakturoid credentials state ───────────────────────────────────────
 // Dva paralelní auth flow (issue #31):
@@ -493,12 +607,14 @@ function gotoInvoice(id: number) {
 
 onMounted(() => {
   loadIdokladStatus()
+  loadWalletStatus()
   loadFakStatus()
   loadAiStatus()
 })
 
 onUnmounted(() => {
   if (pollTimer) clearInterval(pollTimer)
+  if (walletPollTimer) clearInterval(walletPollTimer)
 })
 </script>
 
@@ -512,7 +628,7 @@ onUnmounted(() => {
     <!-- Tabs: iDoklad / Fakturoid / AI -->
     <div class="border-b border-neutral-200 mb-4 flex gap-1 overflow-x-auto">
       <button
-        v-for="tt in (['idoklad', 'fakturoid', 'ai'] as const)" :key="tt"
+        v-for="tt in (['idoklad', 'fakturoid', 'wallet', 'ai'] as const)" :key="tt"
         @click="tab = tt"
         class="cursor-pointer px-4 py-2 text-sm border-b-2 transition whitespace-nowrap inline-flex items-center gap-1.5"
         :class="tab === tt
@@ -696,6 +812,125 @@ onUnmounted(() => {
           <details v-if="currentJob.log_text" class="text-xs">
             <summary class="cursor-pointer text-neutral-600 hover:text-neutral-900">{{ t('integrations.idoklad.log') }}</summary>
             <pre class="mt-2 max-h-72 overflow-y-auto bg-neutral-900 text-neutral-100 p-3 rounded font-mono text-[11px] whitespace-pre-wrap">{{ currentJob.log_text }}</pre>
+          </details>
+        </div>
+      </div>
+    </div>
+
+    <!-- ════ Wallet (BudgetBakers) tab ════ -->
+    <div v-if="tab === 'wallet'" class="space-y-4">
+      <!-- Box: token -->
+      <div class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
+        <h2 class="text-sm font-medium text-neutral-700 mb-2">{{ t('integrations.wallet.credentials_title') }}</h2>
+        <p class="text-xs text-neutral-500 mb-4">{{ t('integrations.wallet.credentials_hint') }}</p>
+
+        <div class="rounded-md bg-primary-50 border border-primary-200 px-3 py-2 text-sm text-primary-700 mb-4" v-if="walletStatus?.configured">
+          <strong>✓ {{ t('integrations.wallet.configured') }}</strong>
+        </div>
+
+        <div>
+          <label class="block text-sm text-neutral-700 mb-1">{{ t('integrations.wallet.token') }} *</label>
+          <div class="flex gap-2">
+            <input v-model="walletToken" :type="showWalletToken ? 'text' : 'password'" maxlength="1500"
+                   class="flex-1 h-10 px-3 border border-neutral-300 rounded-md text-sm font-mono"
+                   :placeholder="walletStatus?.configured ? t('integrations.wallet.token_placeholder_existing') : ''" />
+            <button type="button" @click="showWalletToken = !showWalletToken"
+                    class="cursor-pointer h-10 px-3 border border-neutral-300 rounded-md hover:bg-neutral-50 text-sm">
+              {{ showWalletToken ? '🙈' : '👁' }}
+            </button>
+          </div>
+          <p class="text-xs text-neutral-500 mt-1">{{ t('integrations.wallet.token_hint') }}</p>
+        </div>
+
+        <div v-if="walletTestMsg" class="mt-3 rounded-md px-3 py-2 text-sm"
+             :class="walletTestMsg.ok ? 'bg-success-50 text-success-600 border border-success-500/40' : 'bg-danger-50 text-danger-500 border border-danger-500/40'">
+          {{ walletTestMsg.text }}
+        </div>
+
+        <div class="flex items-center justify-between gap-2 mt-4 pt-4 border-t border-neutral-100">
+          <button v-if="walletStatus?.configured" type="button" @click="deleteWalletCreds"
+                  class="cursor-pointer h-10 px-4 text-sm border border-danger-500/50 text-danger-500 hover:bg-danger-50 rounded-md">
+            {{ t('integrations.wallet.delete') }}
+          </button>
+          <span v-else></span>
+          <button type="button" @click="saveWalletCreds" :disabled="walletSaving"
+                  class="cursor-pointer h-10 px-5 text-sm bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white font-medium rounded-md">
+            {{ walletSaving ? '…' : t('integrations.wallet.save_and_test') }}
+          </button>
+        </div>
+
+        <details class="mt-4 text-xs text-neutral-500">
+          <summary class="cursor-pointer hover:text-neutral-700">{{ t('integrations.wallet.how_to_get') }}</summary>
+          <ol class="mt-2 list-decimal list-inside space-y-1">
+            <li>{{ t('integrations.wallet.step1') }}</li>
+            <li>{{ t('integrations.wallet.step2') }}</li>
+            <li>{{ t('integrations.wallet.step3') }}</li>
+          </ol>
+        </details>
+      </div>
+
+      <!-- Box: import controls -->
+      <div v-if="walletStatus?.configured" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
+        <h2 class="text-sm font-medium text-neutral-700 mb-3">{{ t('integrations.wallet.run_title') }}</h2>
+
+        <div v-if="!isWalletJobRunning" class="space-y-3">
+          <p class="text-sm text-neutral-600">{{ t('integrations.wallet.run_hint') }}</p>
+          <div class="grid grid-cols-2 gap-3">
+            <label class="flex items-center gap-2 text-sm">
+              <input v-model="walletParams.include_bank_accounts" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+              <span :title="t('integrations.wallet.include_bank_accounts_hint')">{{ t('integrations.wallet.include_bank_accounts') }}</span>
+            </label>
+            <label class="flex items-center gap-2 text-sm">
+              <input v-model="walletParams.include_bank_transactions" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+              {{ t('integrations.wallet.include_bank_transactions') }}
+            </label>
+            <label class="flex items-center gap-2 text-sm">
+              <input v-model="walletParams.incremental" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+              <span :title="t('integrations.wallet.incremental_hint')">{{ t('integrations.wallet.incremental') }}</span>
+            </label>
+            <label class="flex items-center gap-2 text-sm">
+              <input v-model="walletParams.dry_run" type="checkbox" class="rounded border-neutral-300 text-primary-600" />
+              {{ t('integrations.idoklad.dry_run') }}
+            </label>
+          </div>
+          <button type="button" @click="startWalletImport" :disabled="walletStarting"
+                  class="cursor-pointer w-full h-10 bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white text-sm font-medium rounded-md inline-flex items-center justify-center gap-2">
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M14.752 11.168l-3.197-2.132A1 1 0 0 0 10 9.87v4.263a1 1 0 0 0 1.555.832l3.197-2.132a1 1 0 0 0 0-1.664z"/><path stroke-linecap="round" stroke-linejoin="round" d="M21 12a9 9 0 1 1-18 0 9 9 0 0 1 18 0z"/></svg>
+            {{ walletStarting ? '…' : t('integrations.wallet.start_import') }}
+          </button>
+          <p class="text-xs text-neutral-400">{{ t('integrations.wallet.auto_note') }}</p>
+        </div>
+
+        <div v-if="walletJob" class="space-y-3">
+          <div class="flex items-center justify-between text-sm">
+            <div>
+              <span class="font-medium">Job #{{ walletJob.id }}</span>
+              <span class="ml-2 px-2 py-0.5 text-xs rounded border"
+                    :class="{
+                      'bg-neutral-100 text-neutral-600 border-neutral-200': walletJob.status === 'queued',
+                      'bg-primary-50 text-primary-700 border-primary-500/40': walletJob.status === 'running',
+                      'bg-success-50 text-success-600 border-success-500/40': walletJob.status === 'completed',
+                      'bg-danger-50 text-danger-500 border-danger-500/40': walletJob.status === 'failed',
+                      'bg-warning-50 text-warning-600 border-warning-500/40': walletJob.status === 'cancelled',
+                    }">
+                {{ t('integrations.idoklad.status.' + walletJob.status) }}
+              </span>
+            </div>
+            <button type="button" @click="deleteWalletJob"
+                    class="cursor-pointer h-8 px-3 text-xs border border-neutral-300 text-neutral-600 hover:bg-neutral-100 rounded-md">
+              {{ t('integrations.idoklad.delete') }}
+            </button>
+          </div>
+
+          <div v-if="walletJob.current_step" class="text-sm text-neutral-600">{{ walletJob.current_step }}</div>
+
+          <div v-if="walletJob.last_error" class="rounded-md bg-danger-50 border border-danger-500/40 px-3 py-2 text-sm text-danger-500">
+            {{ walletJob.last_error }}
+          </div>
+
+          <details v-if="walletJob.log_text" class="text-xs" open>
+            <summary class="cursor-pointer text-neutral-600 hover:text-neutral-900">{{ t('integrations.idoklad.log') }}</summary>
+            <pre class="mt-2 max-h-72 overflow-y-auto bg-neutral-900 text-neutral-100 p-3 rounded font-mono text-[11px] whitespace-pre-wrap">{{ walletJob.log_text }}</pre>
           </details>
         </div>
       </div>

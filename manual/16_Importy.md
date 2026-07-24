@@ -379,3 +379,44 @@ nároku zůstává výchozí kód `42`.
 **Kontakty z iDoklad/Fakturoid nemají emaily**
 → Originální systém je nemá vyplněné. Doplň ručně v `Klienti` po importu —
 jinak nebudou fungovat upomínky.
+
+## 16.13 Wallet (BudgetBakers) — automatické párování plateb z banky
+
+**Systém → Externí integrace → Wallet (banky).** Wallet agreguje pohyby
+z napojených bank (Air Bank, Raiffeisenbank a další) a MyInvoice si je přes
+jeho REST API stahuje jako virtuální výpis — nové platby se automaticky
+párují s fakturami a faktura se sama označí jako **Zaplaceno** s datem
+skutečné platby.
+
+### 16.13.1 Nastavení
+
+1. Ve Wallet web appce (web.budgetbakers.com, vyžaduje Premium): profil
+   vpravo nahoře → **Settings → REST API** → vygeneruj osobní token.
+2. V MyInvoice vlož token do **Externí integrace → Wallet** a ulož —
+   provede se test připojení. Token ulož **pro každou firmu**, kterou má
+   Wallet párovat (import bere jen účty namapované na danou firmu).
+3. Spusť první import (nech zaškrtnuté **Synchronizovat účty** i
+   **Importovat pohyby + párovat**). Účty z Walletu se namapují podle
+   čísla účtu na bankovní účty firmy (Číselníky → Měny a účty); pohyby
+   se importují **jen z namapovaných účtů** — soukromé podúčty
+   se ignorují.
+
+Dál už vše běží samo: cron úloha `cron-wallet-sync` každých 30 minut
+stáhne nové pohyby (inkrementálně, s překryvem kvůli zpožděnému bank
+syncu Walletu) a spáruje je.
+
+### 16.13.2 Jak se páruje
+
+- Wallet nemá pole pro variabilní symbol — **VS se vytahuje ze zprávy
+  pro příjemce** („Faktura 20260004", „VS: 1234", „20265001 FIRMA").
+  Špatný kandidát ničemu neublíží: párování vyžaduje existující fakturu
+  s daným číslem a sedící částku.
+- Bez VS nastupují stávající záchranné mechanismy párování (částka
+  + datum + protiúčet); nejasné případy zůstávají v **Nespárováno**
+  k ručnímu potvrzení.
+- Platba navázaná na fakturu **už ručně označenou jako zaplacenou**
+  opraví datum úhrady podle skutečného data z banky (jen pokud úhradu
+  nedrží jiná bankovní platba a nejde o částečné úhrady).
+- Když stejná platba později dorazí i oficiálním GPC/PDF výpisem,
+  duplicitě brání stejný mechanismus jako u e-mailových avíz
+  (wallet dvojče se ignoruje ve prospěch autoritativního výpisu).

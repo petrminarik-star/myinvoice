@@ -50,6 +50,28 @@ export interface IdokladStartParams {
   dry_run?: boolean
 }
 
+export interface WalletCredentialsStatus {
+  configured: boolean
+}
+
+export interface WalletCredentialsUpdateResult {
+  saved: boolean
+  test_ok: boolean
+  test_error?: string | null
+  /** Počet účtů viditelných přes API (null když Wallet ještě synchronizuje). */
+  accounts?: number | null
+  /** Wallet po vygenerování prvního tokenu ještě synchronizuje data (HTTP 409). */
+  sync_in_progress?: boolean
+}
+
+export interface WalletStartParams {
+  include_bank_accounts?: boolean
+  include_bank_transactions?: boolean
+  /** Jen pohyby od posledního syncu (s překryvem) — používá i cron. */
+  incremental?: boolean
+  dry_run?: boolean
+}
+
 export interface FakturoidCredentialsStatus {
   configured: boolean
   slug: string | null
@@ -130,6 +152,18 @@ export const integrationsApi = {
   startIdoklad: (params: IdokladStartParams = {}) =>
     api.post<{ job_id: number; status: string; params: IdokladStartParams }>(
       '/admin/imports/idoklad/start', params,
+    ).then(r => r.data),
+
+  // Wallet (BudgetBakers) credentials
+  getWalletCreds: () =>
+    api.get<WalletCredentialsStatus>('/admin/imports/wallet/credentials').then(r => r.data),
+  setWalletCreds: (token: string) =>
+    api.put<WalletCredentialsUpdateResult>('/admin/imports/wallet/credentials', { token }).then(r => r.data),
+  deleteWalletCreds: () =>
+    api.delete<{ ok: boolean }>('/admin/imports/wallet/credentials').then(r => r.data),
+  startWallet: (params: WalletStartParams = {}) =>
+    api.post<{ job_id: number; status: string; params: WalletStartParams }>(
+      '/admin/imports/wallet/start', params,
     ).then(r => r.data),
 
   // Fakturoid credentials
