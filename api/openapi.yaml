@@ -198,11 +198,23 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [data, meta]
                 properties:
-                  clients:
+                  data:
                     type: array
                     items: { $ref: '#/components/schemas/Client' }
-                  pagination: { $ref: '#/components/schemas/Pagination' }
+                  meta:
+                    allOf:
+                      - $ref: '#/components/schemas/ListMeta'
+                      - type: object
+                        properties:
+                          role_counts:
+                            type: object
+                            description: "Počty klientů dle role pro tab badge — bez vlivu stránkování a filtru kategorie nákladu"
+                            properties:
+                              all: { type: integer }
+                              customers: { type: integer }
+                              vendors: { type: integer }
         '401':
           $ref: '#/components/responses/Unauthorized'
         '429':
@@ -330,9 +342,14 @@ paths:
       tags: [Invoices]
       summary: Seznam faktur (grouped by month)
       description: |
-        Vrací faktury aktuálního supplier-a, seskupené po měsících podle `issue_date`.
+        Vrací faktury aktuálního supplier-a, seskupené po měsících podle
+        `COALESCE(tax_date, issue_date)` (DUZP, fallback datum vystavení).
         Filtry se předávají jako `filter[key]=value` (deep object). `status` a `type` mohou
         být čárkou oddělené seznamy (`filter[status]=draft,issued`).
+
+        Stránkuje se po jednotlivých fakturách (`meta.total` = počet faktur);
+        měsíční skupiny se skládají až z aktuální stránky, takže skupina na
+        hranici stránky může pokračovat na stránce další.
       parameters:
         - $ref: '#/components/parameters/SupplierIdHeader'
         - in: query
@@ -359,7 +376,7 @@ paths:
           schema: { type: integer }
         - in: query
           name: filter[year]
-          description: Rok (issue_date)
+          description: Rok (dle `COALESCE(tax_date, issue_date)`)
           schema: { type: integer, example: 2026 }
         - in: query
           name: filter[month]
@@ -367,11 +384,11 @@ paths:
           schema: { type: integer, minimum: 1, maximum: 12 }
         - in: query
           name: filter[date_from]
-          description: Datum vystavení od (YYYY-MM-DD)
+          description: Datum od (YYYY-MM-DD, dle `COALESCE(tax_date, issue_date)`)
           schema: { type: string, format: date }
         - in: query
           name: filter[date_to]
-          description: Datum vystavení do (YYYY-MM-DD)
+          description: Datum do (YYYY-MM-DD, dle `COALESCE(tax_date, issue_date)`)
           schema: { type: string, format: date }
         - in: query
           name: filter[currency]
@@ -398,11 +415,13 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [data, meta]
                 properties:
-                  invoices:
+                  data:
                     type: array
-                    items: { $ref: '#/components/schemas/Invoice' }
-                  pagination: { $ref: '#/components/schemas/Pagination' }
+                    description: Měsíční skupiny, řazené od nejnovějšího měsíce.
+                    items: { $ref: '#/components/schemas/InvoiceMonthGroup' }
+                  meta: { $ref: '#/components/schemas/ListMeta' }
     post:
       tags: [Invoices]
       summary: Vytvoří draft faktury
@@ -5505,12 +5524,15 @@ components:
             code: { type: string, example: validation_failed }
             message: { type: string, example: "Pole 'name' je povinné." }
 
-    Pagination:
+    ListMeta:
       type: object
+      description: "Stránkovací metadata seznamů (obálka `meta`)."
+      required: [total]
       properties:
+        total: { type: integer, example: 423, description: "Celkový počet záznamů přes všechny stránky" }
         page: { type: integer, example: 1 }
         per_page: { type: integer, example: 50 }
-        total: { type: integer, example: 423 }
+        pages: { type: integer, example: 9, description: "Celkový počet stránek" }
 
     ApiMe:
       type: object
@@ -5870,6 +5892,41 @@ components:
         cancelled_at: { type: [string, "null"], format: date-time }
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
+
+    InvoiceMonthGroup:
+      type: object
+      description: |
+        Jedna měsíční skupina výpisu faktur (GET /invoices). Měsíc se určuje
+        z `COALESCE(tax_date, issue_date)`.
+      required: [month, count, totals_per_currency, invoices]
+      properties:
+        month: { type: string, example: "2026-05", description: "Měsíc ve formátu YYYY-MM" }
+        count: { type: integer, description: "Počet faktur skupiny na aktuální stránce" }
+        totals_per_currency:
+          type: array
+          description: |
+            Měsíční obrat po měnách. Do obratu (`without_vat`/`vat`/`with_vat`) se
+            počítají jen vystavené doklady (`issued`/`sent`/`reminded`/`paid`) typu
+            `invoice`/`credit_note`/`tax_document`; koncepty (`draft`) stejných typů
+            jdou zvlášť do `draft_*` (predikce „rozpracováno k vystavení“).
+            Proformy, storna a stornované doklady se nezapočítávají vůbec.
+          items:
+            type: object
+            properties:
+              currency: { type: string, example: CZK }
+              without_vat: { type: number, format: float }
+              vat: { type: number, format: float }
+              with_vat: { type: number, format: float }
+              draft_without_vat: { type: number, format: float }
+              draft_vat: { type: number, format: float }
+              draft_with_vat: { type: number, format: float }
+        invoices:
+          type: array
+          description: |
+            Faktury skupiny — list vrací podmnožinu polí `Invoice` (bez items,
+            bankovních polí apod.) plus listová pole `month_bucket` (YYYY-MM),
+            `has_work_report` a `project_requires_approval`.
+          items: { $ref: '#/components/schemas/Invoice' }
 
     InvoiceInput:
       type: object
