@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted, watch } from 'vue'
+import DateInput from '@/components/ui/DateInput.vue'
 import { useI18n } from 'vue-i18n'
 import { useToast } from '@/composables/useToast'
 import { logbookApi, type Car, type CarPayload, type FuelType } from '@/api/logbook'
@@ -202,7 +203,7 @@ function fuelLabel(f: FuelType | null): string {
             </div>
             <div>
               <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('logbook.odometer_start_date') }}</label>
-              <input v-model="draft.odometer_start_date" type="date" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+              <DateInput v-model="draft.odometer_start_date" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
             </div>
             <div class="col-span-2">
               <label class="block text-sm font-medium text-neutral-700 mb-1">VIN</label>

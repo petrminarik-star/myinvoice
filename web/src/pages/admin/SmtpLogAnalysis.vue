@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue'
+import DateInput from '@/components/ui/DateInput.vue'
 import { useI18n } from 'vue-i18n'
 import { adminApi, type SmtpLogAnalysis } from '@/api/admin'
 
@@ -191,9 +192,9 @@ function toggleStatus(s: string) {
           <option value="error">{{ t('smtp_logs.status.error') }}</option>
           <option value="rejected_error">{{ t('smtp_logs.status.rejected_error') }}</option>
         </select>
-        <input v-model="filter.date_from" type="date" class="h-9 px-2 border border-neutral-300 rounded-md bg-surface text-sm" />
+        <DateInput v-model="filter.date_from" class="h-9 px-2 border border-neutral-300 rounded-md bg-surface text-sm" />
         <span class="text-neutral-400 text-sm">–</span>
-        <input v-model="filter.date_to" type="date" class="h-9 px-2 border border-neutral-300 rounded-md bg-surface text-sm" />
+        <DateInput v-model="filter.date_to" class="h-9 px-2 border border-neutral-300 rounded-md bg-surface text-sm" />
         <button @click="load" class="cursor-pointer h-9 px-3 border border-neutral-300 rounded-md text-sm hover:bg-neutral-50">
           {{ t('smtp_logs.refresh') }}
         </button>

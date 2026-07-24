@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch, nextTick } from 'vue'
+import DateInput from '@/components/ui/DateInput.vue'
 import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { recurringApi, type RecurringTemplate, type RecurringTemplatePayload, type Frequency } from '@/api/recurring'
@@ -900,12 +901,12 @@ async function submit() {
         <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
           <div>
             <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('recurring.anchor_date') }} *</label>
-            <input v-model="form.anchor_date" type="date"
+            <DateInput v-model="form.anchor_date"
               class="w-full h-10 px-3 border border-neutral-300 rounded-md" />
           </div>
           <div>
             <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('recurring.end_date') }}</label>
-            <input v-model="form.end_date" type="date"
+            <DateInput v-model="form.end_date"
               class="w-full h-10 px-3 border border-neutral-300 rounded-md" />
           </div>
         </div>

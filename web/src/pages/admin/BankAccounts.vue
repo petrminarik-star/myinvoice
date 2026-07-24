@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
+import DateInput from '@/components/ui/DateInput.vue'
 import { useI18n } from 'vue-i18n'
 import { useRoute, useRouter } from 'vue-router'
 import { bankNameByCode, isKnownBankName } from '@/utils/czBankCodes'
@@ -1170,7 +1171,7 @@ async function deleteMessage(m: BankEmailProcessedMessage) {
             </div>
             <div>
               <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('bank_accounts.process_from') }}</label>
-              <input v-model="imapDraft.process_from_date" type="date"
+              <DateInput v-model="imapDraft.process_from_date"
                 class="w-full h-10 px-3 bg-surface border border-neutral-300 rounded-md text-sm" />
             </div>
             <label class="flex items-center gap-2 text-sm mt-7">

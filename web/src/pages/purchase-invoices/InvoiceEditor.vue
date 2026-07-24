@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, nextTick } from 'vue'
+import DateInput from '@/components/ui/DateInput.vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 // RouterLink se používá i v Add Currency modalu — import už pokrývá
 import { useI18n } from 'vue-i18n'
@@ -978,19 +979,19 @@ function fieldErr(key: string): string | null {
         <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div>
             <label class="block text-sm text-neutral-700 mb-1">{{ t('purchase_invoice.fields.issue_date') }} <span class="text-danger-500">*</span></label>
-            <input v-model="form.issue_date" type="date" required class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+            <DateInput v-model="form.issue_date" required class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
           </div>
           <div>
             <label class="block text-sm text-neutral-700 mb-1">{{ t('purchase_invoice.fields.tax_date') }}</label>
-            <input v-model="form.tax_date" type="date" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+            <DateInput v-model="form.tax_date" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
           </div>
           <div>
             <label class="block text-sm text-neutral-700 mb-1">{{ t('purchase_invoice.fields.due_date') }} <span class="text-danger-500">*</span></label>
-            <input v-model="form.due_date" type="date" required class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+            <DateInput v-model="form.due_date" required class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
           </div>
           <div>
             <label class="block text-sm text-neutral-700 mb-1">{{ t('purchase_invoice.fields.received_at') }}</label>
-            <input v-model="form.received_at" type="date" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
+            <DateInput v-model="form.received_at" class="w-full h-10 px-3 border border-neutral-300 rounded-md text-sm" />
           </div>
         </div>
         <!-- RC: DPH období se řídí DUZP (§ 25 / § 24), ne datem vystavení — issue #117 -->

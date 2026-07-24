@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import LinkedDocumentsPanel from '@/components/documents/LinkedDocumentsPanel.vue'
+import DateInput from '@/components/ui/DateInput.vue'
 import { ref, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { useI18n } from 'vue-i18n'
@@ -1367,7 +1368,7 @@ const invoiceActions = computed<ActionItem[]>(() => {
       <div class="bg-surface rounded-xl shadow-lg max-w-sm w-full p-5">
         <h3 class="text-lg font-semibold mb-3">{{ t('invoice.modals.mark_paid_title') }}</h3>
         <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.modals.mark_paid_date') }}</label>
-        <input v-model="paidAtInput" type="date" class="w-full h-10 px-3 border border-neutral-300 rounded-md mb-4" />
+        <DateInput v-model="paidAtInput" class="w-full h-10 px-3 border border-neutral-300 rounded-md mb-4" />
         <label v-if="thanksEnabled" class="flex items-start gap-2 text-sm text-neutral-700 mb-4 cursor-pointer">
           <input v-model="sendThanks" type="checkbox" :disabled="!thanksHasRecipient" class="mt-0.5 rounded border-neutral-300 text-primary-600 disabled:opacity-50" />
           <span>
@@ -1441,7 +1442,7 @@ const invoiceActions = computed<ActionItem[]>(() => {
         <input v-model="partialAmount" type="number" step="0.01" min="0.01" :placeholder="String(remainingToPay)"
           class="w-full h-10 px-3 border border-neutral-300 rounded-md mb-3 font-mono" />
         <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.modals.mark_paid_date') }}</label>
-        <input v-model="partialDate" type="date" class="w-full h-10 px-3 border border-neutral-300 rounded-md mb-3" />
+        <DateInput v-model="partialDate" class="w-full h-10 px-3 border border-neutral-300 rounded-md mb-3" />
         <div class="grid grid-cols-2 gap-2 mb-3">
           <div>
             <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.payments.vs') }}</label>

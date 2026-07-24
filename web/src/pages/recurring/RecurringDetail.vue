@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import DateInput from '@/components/ui/DateInput.vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import {
@@ -444,7 +445,7 @@ const recurringActions = computed<ActionItem[]>(() => {
 
         <label v-if="!isPeriodDraft" class="block text-sm">
           <span class="text-neutral-700 font-medium">{{ t('recurring.run_now_issue_date_label') }}</span>
-          <input v-model="runNowDate" type="date"
+          <DateInput v-model="runNowDate"
             class="mt-1 w-full h-10 px-3 border border-neutral-300 rounded-md" />
         </label>
 

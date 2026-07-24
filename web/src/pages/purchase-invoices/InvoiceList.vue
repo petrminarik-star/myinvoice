@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
+import DateInput from '@/components/ui/DateInput.vue'
 import { RouterLink, useRouter, useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
@@ -515,9 +516,9 @@ async function bulkSetKind() {
           <option :value="''">{{ t('invoice.all_months') }}</option>
           <option v-for="(label, i) in monthOptions" :key="i + 1" :value="i + 1">{{ label }}</option>
         </select>
-        <input v-model="dateFrom" type="date" :placeholder="t('common.from')"
+        <DateInput v-model="dateFrom" :placeholder="t('common.from')"
           class="h-9 px-2 border border-neutral-300 rounded-md text-sm" :title="t('common.from')" />
-        <input v-model="dateTo" type="date" :placeholder="t('common.to')"
+        <DateInput v-model="dateTo" :placeholder="t('common.to')"
           class="h-9 px-2 border border-neutral-300 rounded-md text-sm" :title="t('common.to')" />
         <button v-if="dateFrom || dateTo" @click="dateFrom = ''; dateTo = ''"
           class="cursor-pointer h-9 px-2 text-xs text-neutral-500 hover:text-neutral-700">{{ t('invoice.clear_date_filter') }}</button>

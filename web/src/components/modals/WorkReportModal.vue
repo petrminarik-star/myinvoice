@@ -22,6 +22,7 @@
  * Oba výkazy se ukládají (i schvalují) společně — sdílí jednu work_reports řádku.
  */
 import { ref, computed, watch, onMounted } from 'vue'
+import DateInput from '@/components/ui/DateInput.vue'
 import { useI18n } from 'vue-i18n'
 import { invoicesApi, type WorkReportItem, type WorkReportMaterial } from '@/api/invoices'
 import { codebooksApi, type Unit, type VatRate } from '@/api/codebooks'
@@ -430,7 +431,7 @@ onMounted(() => {
                            class="w-full h-9 px-2 border border-neutral-300 rounded text-sm" />
                   </td>
                   <td class="px-3 py-1.5">
-                    <input v-model="it.work_date" type="date"
+                    <DateInput v-model="it.work_date"
                            class="w-full h-9 px-2 border border-neutral-300 rounded text-sm" />
                   </td>
                   <td class="px-3 py-1.5">
@@ -493,7 +494,7 @@ onMounted(() => {
                 <div class="grid grid-cols-3 gap-2">
                   <div>
                     <label class="block text-[11px] text-neutral-500 mb-0.5">{{ t('invoice.wr_date') }}</label>
-                    <input v-model="it.work_date" type="date"
+                    <DateInput v-model="it.work_date"
                            class="w-full h-9 px-2 border border-neutral-300 rounded text-sm" />
                   </div>
                   <div>

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed } from 'vue'
+import DateInput from '@/components/ui/DateInput.vue'
 import { useI18n } from 'vue-i18n'
 import { tokensApi, type ApiToken, type CreateTokenResult } from '@/api/tokens'
 import { useAuthStore } from '@/stores/auth'
@@ -259,7 +260,7 @@ onMounted(load)
 
           <label class="block text-sm">
             <span class="text-neutral-700 font-medium">{{ t('api_tokens.col_expires') }} <span class="text-neutral-400">{{ t('common.optional') }}</span></span>
-            <input v-model="form.expires_at" type="date"
+            <DateInput v-model="form.expires_at"
               class="mt-1 w-full h-10 px-3 border border-neutral-300 rounded-md" />
           </label>
 

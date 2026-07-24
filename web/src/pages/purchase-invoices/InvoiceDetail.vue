@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import LinkedDocumentsPanel from '@/components/documents/LinkedDocumentsPanel.vue'
+import DateInput from '@/components/ui/DateInput.vue'
 import PdfDropzone from '@/components/purchase/PdfDropzone.vue'
 import { ref, reactive, computed, onMounted, watch } from 'vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
@@ -1046,7 +1047,7 @@ const purchaseActions = computed<ActionItem[]>(() => {
       <div class="bg-surface rounded-xl shadow-lg max-w-sm w-full p-5">
         <h3 class="text-lg font-semibold mb-3">{{ t('purchase_invoice.modals.mark_paid_title') }}</h3>
         <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('purchase_invoice.modals.mark_paid_date') }}</label>
-        <input v-model="paidAtInput" type="date" class="w-full h-10 px-3 border border-neutral-300 rounded-md mb-4" />
+        <DateInput v-model="paidAtInput" class="w-full h-10 px-3 border border-neutral-300 rounded-md mb-4" />
         <div class="flex justify-end gap-2">
           <button type="button" @click="markPaidOpen = false"
             class="cursor-pointer px-3 h-9 text-sm border border-neutral-300 rounded-md text-neutral-700 hover:bg-neutral-50">{{ t('common.cancel') }}</button>

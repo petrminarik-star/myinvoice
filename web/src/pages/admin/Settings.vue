@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, computed, watch } from 'vue'
+import DateInput from '@/components/ui/DateInput.vue'
 import { useI18n } from 'vue-i18n'
 import { settingsApi, type Supplier, type SelfCopyType, type SelfCopyMode } from '@/api/settings'
 import { adminApi, type SampleDataStatus } from '@/api/admin'
@@ -709,12 +710,12 @@ async function removeLogo() {
                 </div>
                 <div>
                   <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.oss_valid_from') }}</label>
-                  <input v-model="(supplier as any).oss_valid_from" type="date"
+                  <DateInput v-model="(supplier as any).oss_valid_from"
                     class="w-full h-9 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
                 </div>
                 <div>
                   <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.oss_valid_to') }}</label>
-                  <input v-model="(supplier as any).oss_valid_to" type="date"
+                  <DateInput v-model="(supplier as any).oss_valid_to"
                     class="w-full h-9 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
                 </div>
               </div>

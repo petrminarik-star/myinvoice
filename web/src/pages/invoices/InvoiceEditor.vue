@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch, nextTick } from 'vue'
+import DateInput from '@/components/ui/DateInput.vue'
 import { useRoute, useRouter, RouterLink } from 'vue-router'
 import { invoicesApi, type Invoice, type InvoicePayload, type InvoiceItem, type WorkReportItem, type WorkReportMaterial, type InvoiceAttachment } from '@/api/invoices'
 import { useHotkey } from '@/composables/useHotkey'
@@ -1659,18 +1660,18 @@ async function deleteDraft() {
             </div>
             <div>
               <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.issue_date') }} *</label>
-              <input v-model="form.issue_date" type="date" required class="w-full h-10 px-3 border border-neutral-300 rounded-md" />
+              <DateInput v-model="form.issue_date" required class="w-full h-10 px-3 border border-neutral-300 rounded-md" />
             </div>
             <div v-if="form.invoice_type !== 'proforma'">
               <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.tax_date') }} *</label>
-              <input v-model="form.tax_date" type="date" required class="w-full h-10 px-3 border border-neutral-300 rounded-md" />
+              <DateInput v-model="form.tax_date" required class="w-full h-10 px-3 border border-neutral-300 rounded-md" />
             </div>
             <div v-else class="rounded-md bg-accent-50 border border-accent-100 p-3 text-sm text-accent-600">
               {{ t('invoice.proforma_no_tax_point') }}
             </div>
             <div>
               <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('invoice.due_date') }} *</label>
-              <input v-model="form.due_date" type="date" required class="w-full h-10 px-3 border border-neutral-300 rounded-md" />
+              <DateInput v-model="form.due_date" required class="w-full h-10 px-3 border border-neutral-300 rounded-md" />
             </div>
             <div v-if="form.invoice_type !== 'credit_note' && remindersAvailable">
               <label class="flex items-center gap-2 text-sm text-neutral-700">
@@ -2076,7 +2077,7 @@ async function deleteDraft() {
                   <input v-model="it.description" type="text" data-row-input="inv-wr" class="w-full h-9 px-2 border border-neutral-300 rounded text-sm" />
                 </td>
                 <td class="px-2 py-1.5">
-                  <input v-model="it.work_date" type="date" class="w-full h-9 px-2 border border-neutral-300 rounded text-sm font-mono" />
+                  <DateInput v-model="it.work_date" class="w-full h-9 px-2 border border-neutral-300 rounded text-sm font-mono" />
                 </td>
                 <td class="px-2 py-1.5">
                   <input v-model.number="it.hours" type="number" step="0.25" min="0" class="w-full h-9 px-2 border border-neutral-300 rounded text-sm text-right font-mono" />
@@ -2143,7 +2144,7 @@ async function deleteDraft() {
               <div class="grid grid-cols-2 gap-2">
                 <div>
                   <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.wr_date') }}</label>
-                  <input v-model="it.work_date" type="date" class="w-full h-10 px-3 border border-neutral-300 rounded text-sm font-mono bg-surface" />
+                  <DateInput v-model="it.work_date" class="w-full h-10 px-3 border border-neutral-300 rounded text-sm font-mono bg-surface" />
                 </div>
                 <div>
                   <label class="block text-xs font-medium text-neutral-600 mb-1">{{ t('invoice.wr_hours') }}</label>

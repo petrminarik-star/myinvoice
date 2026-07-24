@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue'
+import DateInput from '@/components/ui/DateInput.vue'
 import { useRoute } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
@@ -470,7 +471,7 @@ function payerAccountDisplay(item: PaymentOrderListItem): string {
         </div>
         <div>
           <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('payment_order.payment_date') }}</label>
-          <input v-model="paymentDate" type="date"
+          <DateInput v-model="paymentDate"
             class="w-full h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm" />
         </div>
         <div>
