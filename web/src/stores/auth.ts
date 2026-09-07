@@ -3,6 +3,7 @@ import { ref, computed } from 'vue'
 import { authApi, type User, type SetupStatus, type SessionState } from '@/api/auth'
 import { setCsrfToken } from '@/api/client'
 import { broadcastSessionEvent } from '@/security/sessionChannel'
+import { setOverdueIncludesToday } from '@/utils/invoiceOverdue'
 import { useSupplierStore } from './supplier'
 
 export const useAuthStore = defineStore('auth', () => {
@@ -30,6 +31,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function fetchSetupStatus() {
     setupStatus.value = await authApi.setupStatus()
+    setOverdueIncludesToday(setupStatus.value.overdue_includes_today === true)
     return setupStatus.value
   }
 
