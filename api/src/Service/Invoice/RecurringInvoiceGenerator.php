@@ -60,7 +60,7 @@ final class RecurringInvoiceGenerator
     /**
      * @return array{invoice_id:int, varsymbol:?string, issued:bool, sent_to:list<string>, new_next_run_date:?string, template_status:string}
      */
-    public function generate(int $templateId, ?string $forcedIssueDate = null, ?int $userId = null, string $ip = '', string $ua = 'cron', bool $forceDraft = false): array
+    public function generate(int $templateId, ?string $forcedIssueDate = null, ?int $userId = null, string $ip = '', string $ua = 'cron', bool $forceDraft = false, bool $advanceSchedule = true): array
     {
         $template = $this->templates->find($templateId);
         if ($template === null) {
@@ -70,6 +70,9 @@ final class RecurringInvoiceGenerator
             throw new \DomainException("Šablona #$templateId nemá žádné položky.");
         }
 
+        if (!$advanceSchedule && ($template['draft_open_mode'] ?? 'at_issue') === 'period_start') {
+            throw new \DomainException('Režim Na začátku období používá plánovaný koncept.');
+        }
         $issueDate = $forcedIssueDate ?? (string) $template['next_run_date'];
 
         // Cron volá s $userId=null — fallback na autora šablony, aby invoices.created_by
@@ -87,7 +90,7 @@ final class RecurringInvoiceGenerator
 
         // forceDraft = ruční „Vygenerovat koncept" — vždy nech draft (i u auto_issue=true),
         // uživatel ho pak vystaví/upraví ručně. Rozvrh posouváme stejně jako u běžné
-        // generace, aby cron tutéž periodu nevygeneroval podruhé.
+        // generace, pokud uživatel výslovně nezvolí mimořádnou fakturu.
         if ($forceDraft) {
             $issued = false;
             $sentTo = [];
@@ -97,8 +100,12 @@ final class RecurringInvoiceGenerator
                 $this->performIssue($invoiceId, $template, $userId, $ip, $ua);
         }
 
-        ['next' => $newNext, 'status' => $newStatus] =
-            $this->advanceTemplateSchedule($templateId, $template, $issueDate);
+        $newNext = (string) $template['next_run_date'];
+        $newStatus = (string) $template['status'];
+        if ($advanceSchedule) {
+            ['next' => $newNext, 'status' => $newStatus] =
+                $this->advanceTemplateSchedule($templateId, $template, $issueDate);
+        }
 
         $this->logger->log('recurring.generated', $userId, 'recurring_template', $templateId, [
             'invoice_id'  => $invoiceId,
@@ -106,6 +113,7 @@ final class RecurringInvoiceGenerator
             'auto_issue'  => $template['auto_issue'],
             'auto_send'   => $template['auto_send_email'],
             'sent_to'     => $sentTo,
+            'advance_schedule' => $advanceSchedule,
             'next_run'    => $newNext,
             'new_status'  => $newStatus,
         ], $ip, $ua);
@@ -281,7 +289,7 @@ final class RecurringInvoiceGenerator
     private function advanceTemplateSchedule(int $templateId, array $template, string $issueDate): array
     {
         $newNext = PeriodicityCalculator::nextRunDate(
-            $issueDate,
+            (string) $template['next_run_date'],
             (string) $template['frequency'],
             (bool) $template['end_of_month'],
             $template['day_of_month'] !== null ? (int) $template['day_of_month'] : null,
