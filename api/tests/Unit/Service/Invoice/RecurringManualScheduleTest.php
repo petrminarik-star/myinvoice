@@ -15,6 +15,42 @@ use PHPUnit\Framework\TestCase;
 
 final class RecurringManualScheduleTest extends TestCase
 {
+    public static function generationMethods(): array
+    {
+        return [['generate'], ['openDraft'], ['issuePeriod']];
+    }
+
+    #[DataProvider('generationMethods')]
+    public function testCronRejectsScheduleChangedBeforeLock(string $method): void
+    {
+        $locked = false;
+        $repo = $this->createMock(RecurringTemplateRepository::class);
+        $repo->expects(self::once())->method('lockSchedule')->with(12)->willReturnCallback(function () use (&$locked): void {
+            $locked = true;
+        });
+        $repo->expects(self::once())->method('find')->with(12)->willReturnCallback(function () use (&$locked): array {
+            self::assertTrue($locked);
+            return ['next_run_date' => '2090-03-01'];
+        });
+        $repo->expects(self::once())->method('unlockSchedule')->with(12)->willReturnCallback(function () use (&$locked): void {
+            $locked = false;
+        });
+        $repo->expects(self::never())->method('advanceSchedule');
+        $reflection = new \ReflectionClass(RecurringInvoiceGenerator::class);
+        $args = [];
+        foreach ($reflection->getConstructor()->getParameters() as $parameter) {
+            $type = $parameter->getType()->getName();
+            $args[] = $type === RecurringTemplateRepository::class ? $repo : $this->createStub($type);
+        }
+        $generator = $reflection->newInstanceArgs($args);
+        try {
+            $generator->$method(12, expectedNextRunDate: '2090-02-01');
+            self::fail('Stale cron candidate must be rejected');
+        } catch (\MyInvoice\Service\Invoice\RecurringScheduleChangedException) {
+            self::assertFalse($locked);
+        }
+    }
+
     public static function schedules(): array
     {
         return [

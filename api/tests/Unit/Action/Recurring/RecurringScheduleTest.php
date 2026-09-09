@@ -54,7 +54,17 @@ final class RecurringScheduleTest extends TestCase
     {
         $tpl = $this->template();
         $repo = $this->createMock(RecurringTemplateRepository::class);
-        $repo->method('find')->willReturn($tpl);
+        $locked = false;
+        $repo->expects(self::once())->method('lockSchedule')->with(12)->willReturnCallback(function () use (&$locked): void {
+            $locked = true;
+        });
+        $repo->expects(self::once())->method('unlockSchedule')->with(12)->willReturnCallback(function () use (&$locked): void {
+            $locked = false;
+        });
+        $repo->method('find')->willReturnCallback(function () use ($tpl, &$locked): array {
+            self::assertTrue($locked);
+            return $tpl;
+        });
         $repo->method('findPeriodInvoice')->willReturn(null);
         $repo->expects(self::once())->method('reschedule')->with($tpl, '2090-02-01')->willReturn(true);
         $repo->expects(self::never())->method('advanceSchedule');

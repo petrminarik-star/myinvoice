@@ -21,6 +21,21 @@ final class RecurringTemplateRepository
 {
     public function __construct(private readonly Connection $db) {}
 
+    public function lockSchedule(int $id): void
+    {
+        $stmt = $this->db->pdo()->prepare("SELECT GET_LOCK(CONCAT(DATABASE(), ':recurring:', ?), 0)");
+        $stmt->execute([$id]);
+        if ((int) $stmt->fetchColumn() !== 1) {
+            throw new \MyInvoice\Service\Invoice\RecurringScheduleChangedException('Šablona se právě zpracovává. Zkuste to znovu.');
+        }
+    }
+
+    public function unlockSchedule(int $id): void
+    {
+        $this->db->pdo()->prepare("SELECT RELEASE_LOCK(CONCAT(DATABASE(), ':recurring:', ?))")
+            ->execute([$id]);
+    }
+
     public function find(int $id): ?array
     {
         $stmt = $this->db->pdo()->prepare(

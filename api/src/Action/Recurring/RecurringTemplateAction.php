@@ -357,6 +357,21 @@ final class RecurringTemplateAction
     public function reschedule(Request $request, Response $response, array $args): Response
     {
         $id = (int) ($args['id'] ?? 0);
+        try {
+            $this->repo->lockSchedule($id);
+        } catch (\DomainException $e) {
+            return Json::error($response, 'schedule_busy', $e->getMessage(), 409);
+        }
+        try {
+            return $this->rescheduleLocked($request, $response, $args);
+        } finally {
+            $this->repo->unlockSchedule($id);
+        }
+    }
+
+    private function rescheduleLocked(Request $request, Response $response, array $args): Response
+    {
+        $id = (int) ($args['id'] ?? 0);
         $tpl = $this->repo->find($id);
         if (!SupplierGuard::owns($request, $tpl)) {
             return Json::error($response, 'not_found', 'Šablona nenalezena.', 404);

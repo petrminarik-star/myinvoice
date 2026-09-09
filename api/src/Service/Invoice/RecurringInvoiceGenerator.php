@@ -60,11 +60,24 @@ final class RecurringInvoiceGenerator
     /**
      * @return array{invoice_id:int, varsymbol:?string, issued:bool, sent_to:list<string>, new_next_run_date:?string, template_status:string}
      */
-    public function generate(int $templateId, ?string $forcedIssueDate = null, ?int $userId = null, string $ip = '', string $ua = 'cron', bool $forceDraft = false, bool $advanceSchedule = true): array
+    public function generate(int $templateId, ?string $forcedIssueDate = null, ?int $userId = null, string $ip = '', string $ua = 'cron', bool $forceDraft = false, bool $advanceSchedule = true, ?string $expectedNextRunDate = null): array
+    {
+        $this->templates->lockSchedule($templateId);
+        try {
+            return $this->generateLocked($templateId, $forcedIssueDate, $userId, $ip, $ua, $forceDraft, $advanceSchedule, $expectedNextRunDate);
+        } finally {
+            $this->templates->unlockSchedule($templateId);
+        }
+    }
+
+    private function generateLocked(int $templateId, ?string $forcedIssueDate = null, ?int $userId = null, string $ip = '', string $ua = 'cron', bool $forceDraft = false, bool $advanceSchedule = true, ?string $expectedNextRunDate = null): array
     {
         $template = $this->templates->find($templateId);
         if ($template === null) {
             throw new \RuntimeException("Šablona #$templateId nenalezena");
+        }
+        if ($expectedNextRunDate !== null && $expectedNextRunDate !== (string) $template['next_run_date']) {
+            throw new RecurringScheduleChangedException();
         }
         if (empty($template['items'])) {
             throw new \DomainException("Šablona #$templateId nemá žádné položky.");
@@ -142,11 +155,24 @@ final class RecurringInvoiceGenerator
      *
      * @return array{invoice_id:int, created:bool}
      */
-    public function openDraft(int $templateId, ?int $userId = null, string $ip = '', string $ua = 'cron'): array
+    public function openDraft(int $templateId, ?int $userId = null, string $ip = '', string $ua = 'cron', ?string $expectedNextRunDate = null): array
+    {
+        $this->templates->lockSchedule($templateId);
+        try {
+            return $this->openDraftLocked($templateId, $userId, $ip, $ua, $expectedNextRunDate);
+        } finally {
+            $this->templates->unlockSchedule($templateId);
+        }
+    }
+
+    private function openDraftLocked(int $templateId, ?int $userId = null, string $ip = '', string $ua = 'cron', ?string $expectedNextRunDate = null): array
     {
         $template = $this->templates->find($templateId);
         if ($template === null) {
             throw new \RuntimeException("Šablona #$templateId nenalezena");
+        }
+        if ($expectedNextRunDate !== null && $expectedNextRunDate !== (string) $template['next_run_date']) {
+            throw new RecurringScheduleChangedException();
         }
         if (empty($template['items'])) {
             throw new \DomainException("Šablona #$templateId nemá žádné položky.");
@@ -186,11 +212,24 @@ final class RecurringInvoiceGenerator
      *
      * @return array{invoice_id:int, varsymbol:?string, issued:bool, sent_to:list<string>, new_next_run_date:?string, template_status:string}
      */
-    public function issuePeriod(int $templateId, ?int $userId = null, string $ip = '', string $ua = 'cron'): array
+    public function issuePeriod(int $templateId, ?int $userId = null, string $ip = '', string $ua = 'cron', ?string $expectedNextRunDate = null): array
+    {
+        $this->templates->lockSchedule($templateId);
+        try {
+            return $this->issuePeriodLocked($templateId, $userId, $ip, $ua, $expectedNextRunDate);
+        } finally {
+            $this->templates->unlockSchedule($templateId);
+        }
+    }
+
+    private function issuePeriodLocked(int $templateId, ?int $userId = null, string $ip = '', string $ua = 'cron', ?string $expectedNextRunDate = null): array
     {
         $template = $this->templates->find($templateId);
         if ($template === null) {
             throw new \RuntimeException("Šablona #$templateId nenalezena");
+        }
+        if ($expectedNextRunDate !== null && $expectedNextRunDate !== (string) $template['next_run_date']) {
+            throw new RecurringScheduleChangedException();
         }
         if (empty($template['items'])) {
             throw new \DomainException("Šablona #$templateId nemá žádné položky.");
