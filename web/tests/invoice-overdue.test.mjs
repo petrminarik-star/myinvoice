@@ -15,10 +15,28 @@ const hooks = registerHooks({
     return nextResolve(specifier, context)
   },
 })
-const { overdueDays } = await import('../src/utils/date.ts')
+const { overdueDays, appIsoDate, setAppTimeZone } = await import('../src/utils/date.ts')
 const { isInvoiceDateOverdue, setOverdueIncludesToday } = await import('../src/utils/invoiceOverdue.ts')
 const { isOverdue } = await import('../src/composables/useFormat.ts')
 hooks.deregister()
+
+for (const [timezone, expectedDate, expectedDays] of [
+  ['UTC', '2026-09-07', 0],
+  ['Europe/Prague', '2026-09-08', 1],
+  ['America/New_York', '2026-09-07', 0],
+  ['Asia/Tokyo', '2026-09-08', 1],
+]) {
+  test(`kalendář respektuje nastavené pásmo ${timezone}`, (t) => {
+    t.after(() => setAppTimeZone('Europe/Prague'))
+    t.mock.timers.enable({ apis: ['Date'], now: new Date('2026-09-07T22:30:00Z') })
+    const overdue = computed(() => isInvoiceDateOverdue('2026-09-07'))
+    assert.equal(overdue.value, true)
+    setAppTimeZone(timezone)
+    assert.equal(appIsoDate(), expectedDate)
+    assert.equal(overdueDays('2026-09-07'), expectedDays)
+    assert.equal(overdue.value, expectedDays > 0)
+  })
+}
 
 for (const timezone of ['UTC', 'Europe/Prague', 'America/New_York', 'Asia/Tokyo']) {
   for (const includesToday of [false, true]) {

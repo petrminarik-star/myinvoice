@@ -4,6 +4,7 @@ import { authApi, type User, type SetupStatus, type SessionState } from '@/api/a
 import { setCsrfToken } from '@/api/client'
 import { broadcastSessionEvent } from '@/security/sessionChannel'
 import { setOverdueIncludesToday } from '@/utils/invoiceOverdue'
+import { setAppTimeZone } from '@/utils/date'
 import { useSupplierStore } from './supplier'
 
 export const useAuthStore = defineStore('auth', () => {
@@ -31,6 +32,7 @@ export const useAuthStore = defineStore('auth', () => {
 
   async function fetchSetupStatus() {
     setupStatus.value = await authApi.setupStatus()
+    setAppTimeZone(setupStatus.value.timezone ?? 'Europe/Prague')
     setOverdueIncludesToday(setupStatus.value.overdue_includes_today === true)
     return setupStatus.value
   }

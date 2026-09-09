@@ -31,6 +31,7 @@ final class SetupStatusActionTest extends TestCase
             new Config([
                 'auth' => ['passwordless_login' => ['enabled' => true]],
                 'captcha' => ['provider' => 'none'],
+                'app' => ['timezone' => 'UTC'],
             ]),
             $passkeys,
             $policy,
@@ -46,6 +47,7 @@ final class SetupStatusActionTest extends TestCase
         self::assertSame(200, $response->getStatusCode());
         self::assertTrue($body['passwordless_login_enabled']);
         self::assertTrue($body['overdue_includes_today']);
+        self::assertSame('UTC', $body['timezone']);
     }
 
     public function testPasswordlessLoginDefaultsToHiddenWithoutProbingWebAuthn(): void
@@ -72,5 +74,6 @@ final class SetupStatusActionTest extends TestCase
 
         self::assertFalse($body['passwordless_login_enabled']);
         self::assertFalse($body['overdue_includes_today']);
+        self::assertSame('Europe/Prague', $body['timezone']);
     }
 }

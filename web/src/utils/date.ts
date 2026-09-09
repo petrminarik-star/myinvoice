@@ -1,15 +1,22 @@
-/** Kalendář aplikace odpovídá výchozímu app.timezone na backendu. */
-export const APP_TIME_ZONE = 'Europe/Prague'
+import { shallowRef } from 'vue'
 
-const appDateParts = new Intl.DateTimeFormat('en-CA', {
-  timeZone: APP_TIME_ZONE,
-  year: 'numeric',
-  month: '2-digit',
-  day: '2-digit',
-})
+function dateFormatter(timeZone: string): Intl.DateTimeFormat {
+  return new Intl.DateTimeFormat('en-CA', {
+    timeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  })
+}
+
+const appDateParts = shallowRef(dateFormatter('Europe/Prague'))
+
+export function setAppTimeZone(timeZone: string): void {
+  appDateParts.value = dateFormatter(timeZone)
+}
 
 export function appIsoDate(date: Date = new Date()): string {
-  const parts = appDateParts.formatToParts(date)
+  const parts = appDateParts.value.formatToParts(date)
   const value = (type: Intl.DateTimeFormatPartTypes) =>
     parts.find(part => part.type === type)?.value ?? ''
   return `${value('year')}-${value('month')}-${value('day')}`

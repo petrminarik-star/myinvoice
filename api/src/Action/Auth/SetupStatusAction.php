@@ -33,6 +33,7 @@ final class SetupStatusAction
             'needs_setup' => $this->lockProbe->needsSetup(),
             'version'     => '0.1.0',
             'overdue_includes_today' => $this->overduePolicy->includesToday(),
+            'timezone' => (string) $this->config->get('app.timezone', 'Europe/Prague'),
             'passwordless_login_enabled' =>
                 (bool) $this->config->get('auth.passwordless_login.enabled', false)
                 && $this->passkeys->isAvailable()

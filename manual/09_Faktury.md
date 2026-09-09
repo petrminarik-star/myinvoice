@@ -42,7 +42,7 @@ V každé skupině jsou faktury seřazené podle data vystavení (nejnovější 
 Ve výchozím nastavení je faktura ve splatnosti po celý den uvedený jako datum splatnosti. Mezi doklady
 **po splatnosti** patří až následující kalendářní den, pokud zůstává neuhrazená;
 teprve tehdy se také nabízí běžná upomínka. Rozhoduje datum v časové zóně aplikace
-(Europe/Prague), nikoli časové pásmo prohlížeče. Stejná hranice platí pro filtr
+(`app.timezone`, výchozí `Europe/Prague`), nikoli časové pásmo prohlížeče. Stejná hranice platí pro filtr
 přijatých faktur, dashboard a souhrny klientů a zakázek.
 
 Provozovatel může v `cfg.local.php` zapnout zahrnutí dnešních dokladů do označení
