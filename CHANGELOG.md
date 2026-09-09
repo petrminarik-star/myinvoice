@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.57.0] - 2026-09-09
+
+### Added
+
+- **Automatické odeslání TOTP při přihlášení.** Po zadání nebo vložení šesté číslice se kód odešle automaticky. Odeslání počká na captchu a nevytváří opakované ani souběžné požadavky. (#279)
+- **Oprava příštího termínu pravidelné fakturace.** Detail šablony umožňuje změnit příští termín po potvrzení kontroly existujících faktur. Kontroluje platnost data, již vytvořené doklady a otevřený koncept období. Ukončenou šablonu vrací do pozastaveného stavu. Ruční generování nově rozlišuje nahrazení plánovaného termínu a mimořádnou fakturu bez posunu plánu; dialog předem ukazuje výsledný termín. (#280)
+
+### Fixed
+
+- **Ruční fakturace zachovává původní cyklus šablony.** Příští termín se počítá od plánovaného data, nikoli od data ručně vytvořené faktury. Běžná editace zachovává opravený termín. Změnu plánu a generování chrání společný zámek; cron znovu ověřuje načtený termín, aby nepřepsal souběžnou opravu. (#280)
+- **Jednotné vyhodnocování splatnosti.** Faktura splatná dnes zůstává ve výchozím nastavení ve splatnosti až do konce dne. Seznamy, dashboard a souhrny klientů a zakázek používají stejnou hranici. Frontend respektuje nastavené časové pásmo aplikace a počítá kalendářní dny správně i při změně letního času. Volba `invoices.overdue_includes_today` umožňuje zahrnout dnešní doklady do označení a filtrů po splatnosti; upomínky jsou nadále dostupné až následující den. (#278)
+- **Import PDF výpisu Raiffeisenbank se zápornými zůstatky a rozpisem poplatků.** Parser podporuje záporný počáteční i konečný zůstatek. Dílčí částky rozpisu souhrnného poplatku nepřepisují částku bankovního pohybu a rozpis zůstává v jeho popisu. (#275)
+
 ## [4.56.4] — 2026-09-04
 
 ### Fixed
