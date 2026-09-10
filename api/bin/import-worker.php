@@ -26,7 +26,6 @@ use MyInvoice\Bootstrap;
 use MyInvoice\Repository\ImportJobRepository;
 use MyInvoice\Service\Import\FakturoidImportService;
 use MyInvoice\Service\Import\IdokladImportService;
-use MyInvoice\Service\Import\WalletImportService;
 use MyInvoice\Service\Export\MonthlyExportService;
 use MyInvoice\Service\Document\DocumentJobService;
 
@@ -76,8 +75,6 @@ ignore_user_abort(true);
 try {
     if ($source === 'idoklad') {
         $container->get(IdokladImportService::class)->run($jobId);
-    } elseif ($source === 'wallet') {
-        $container->get(WalletImportService::class)->run($jobId);
     } elseif ($source === 'fakturoid') {
         $container->get(FakturoidImportService::class)->run($jobId);
     } elseif ($source === 'monthly_export') {

@@ -30,8 +30,6 @@ use MyInvoice\Action\Admin\Import\StartFakturoidImportAction;
 use MyInvoice\Action\Admin\Import\ImportJobStatusAction;
 use MyInvoice\Action\Admin\Import\CancelImportJobAction;
 use MyInvoice\Action\Admin\Import\IdokladCredentialsAction;
-use MyInvoice\Action\Admin\Import\WalletCredentialsAction;
-use MyInvoice\Action\Admin\Import\StartWalletImportAction;
 use MyInvoice\Action\Admin\Import\FakturoidCredentialsAction;
 use MyInvoice\Action\Admin\Import\AnthropicCredentialsAction;
 use MyInvoice\Action\Admin\Import\AiExtractPdfAction;
@@ -462,10 +460,6 @@ final class Routes
         $app->put    ('/api/admin/imports/idoklad/credentials', [IdokladCredentialsAction::class, 'update']);
         $app->delete ('/api/admin/imports/idoklad/credentials', [IdokladCredentialsAction::class, 'delete']);
         $app->post   ('/api/admin/imports/idoklad/start',       StartIdokladImportAction::class);
-        $app->get    ('/api/admin/imports/wallet/credentials',  [WalletCredentialsAction::class, 'status']);
-        $app->put    ('/api/admin/imports/wallet/credentials',  [WalletCredentialsAction::class, 'update']);
-        $app->delete ('/api/admin/imports/wallet/credentials',  [WalletCredentialsAction::class, 'delete']);
-        $app->post   ('/api/admin/imports/wallet/start',        StartWalletImportAction::class);
 
         // Fakturoid (fáze 2b) — credentials + start
         $app->get    ('/api/admin/imports/fakturoid/credentials', [FakturoidCredentialsAction::class, 'status']);
