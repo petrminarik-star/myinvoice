@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { reportsApi, type MonthlyExportPreview, type MonthlyExportPart, type MonthlyExportJob, type ExportPeriodArg } from '@/api/reports'
 import { apiErrorMessage } from '@/api/errors'
 import { useToast } from '@/composables/useToast'
 import { useYearOptions } from '@/composables/useYearOptions'
+import { useSessionAwarePolling } from '@/composables/useSessionAwarePolling'
 
 const { t, locale } = useI18n()
 const toast = useToast()
@@ -42,7 +43,7 @@ const starting = ref(false)
 const error = ref('')
 
 const jobs = ref<MonthlyExportJob[]>([])
-let pollTimer: ReturnType<typeof setInterval> | null = null
+const jobsPollingEnabled = ref(true)
 
 function countFor(part: MonthlyExportPart): number {
   return preview.value?.counts[part] ?? 0
@@ -62,10 +63,10 @@ async function loadPreview() {
 
 const anyActive = computed(() => jobs.value.some(j => ['queued', 'running'].includes(j.status)))
 
-async function loadJobs() {
+async function loadJobs(signal?: AbortSignal) {
   try {
     const prev = jobs.value
-    jobs.value = await reportsApi.monthlyExportJobs()
+    jobs.value = await reportsApi.monthlyExportJobs(signal)
     // Toast při přechodu running → completed/failed (jen za běhu polling).
     for (const j of jobs.value) {
       const old = prev.find(p => p.id === j.id)
@@ -75,16 +76,10 @@ async function loadJobs() {
       }
     }
   } catch { /* ponech předchozí stav */ }
-  syncPolling()
+  jobsPollingEnabled.value = anyActive.value
 }
 
-function syncPolling() {
-  if (anyActive.value && !pollTimer) {
-    pollTimer = setInterval(loadJobs, 2000)
-  } else if (!anyActive.value && pollTimer) {
-    clearInterval(pollTimer); pollTimer = null
-  }
-}
+useSessionAwarePolling(signal => loadJobs(signal), 2000, jobsPollingEnabled)
 
 function toggle(part: MonthlyExportPart) {
   const next = new Set(selected.value)
@@ -183,8 +178,7 @@ const groups = computed(() => [
 ])
 
 watch([year, month, quarter, periodType], loadPreview)
-onMounted(() => { loadPreview(); loadJobs() })
-onUnmounted(() => { if (pollTimer) clearInterval(pollTimer) })
+onMounted(() => { loadPreview() })
 </script>
 
 <template>

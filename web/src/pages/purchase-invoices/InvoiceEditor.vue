@@ -23,6 +23,8 @@ import { focusLastRow } from '@/composables/useRowFocus'
 import { useToast } from '@/composables/useToast'
 import { apiErrorMessage } from '@/api/errors'
 import VendorPicker from '@/components/purchase/VendorPicker.vue'
+import Modal from '@/components/ui/Modal.vue'
+import { useAuthStore } from '@/stores/auth'
 import ClientFormModal from '@/components/modals/ClientFormModal.vue'
 import { clientsApi, type Client } from '@/api/clients'
 import PdfDropzone from '@/components/purchase/PdfDropzone.vue'
@@ -33,9 +35,27 @@ const route = useRoute()
 const router = useRouter()
 const { t } = useI18n()
 const toast = useToast()
+const auth = useAuthStore()
 
 const isEdit = computed(() => route.params.id !== undefined && route.params.id !== 'new')
 const invoiceId = computed(() => (isEdit.value ? Number(route.params.id) : null))
+// Odemčení uzamčeného (non-draft) dokladu — POUZE pro tuto návštěvu editoru.
+// Nastavuje se vědomým potvrzením v modalu (checkbox s následky); ?force=1
+// z URL se záměrně ignoruje a příznak nepřežije reload (žádná persistence).
+// Server force-edit audituje jako purchase_invoice.force_edit vč. diffu polí.
+const forceEdit = ref(false)
+const unlockModalOpen = ref(false)
+const unlockAck = ref(false)
+// Stav načtené faktury (draft/received/booked/paid/cancelled) — řídí zámek.
+const editedStatus = ref<string>('draft')
+// Uzamčený doklad: received/booked/paid bez odemčení; cancelled bez výjimky.
+const isLocked = computed(() => isEdit.value && editedStatus.value !== 'draft' && !forceEdit.value)
+const canUnlock = computed(() => auth.user?.role === 'admin' && editedStatus.value !== 'cancelled')
+function confirmUnlock() {
+  forceEdit.value = true
+  unlockModalOpen.value = false
+  unlockAck.value = false
+}
 
 const loaded = ref(false)
 const submitting = ref(false)
@@ -366,6 +386,9 @@ async function loadInvoice(id: number) {
 }
 
 function populate(inv: PurchaseInvoice) {
+  // Stav řídí zámek editoru (isLocked) — mimo draft je formulář disabled,
+  // dokud admin doklad neodemkne potvrzovacím modalem.
+  editedStatus.value = inv.status || 'draft'
   form.value.vendor_id = inv.vendor_id
   form.value.vendor_invoice_number = inv.vendor_invoice_number
   form.value.varsymbol = inv.varsymbol || ''
@@ -637,6 +660,8 @@ async function onReplacePdf() {
 
 async function submit() {
   if (submitting.value) return
+  // Uzamčený doklad: fieldset[disabled] blokuje UI, guard kryje i programové volání.
+  if (isLocked.value) return
   submitting.value = true
   error.value = ''
   fieldErrors.value = {}
@@ -699,9 +724,9 @@ async function submit() {
     }
     let inv: PurchaseInvoice
     if (isEdit.value && invoiceId.value) {
-      // Force flag z URL query (?force=1) — pro admin edit received/booked faktur
-      const force = String(route.query.force ?? '') === '1'
-      inv = await purchaseInvoicesApi.update(invoiceId.value, payload, force)
+      // force=1 se posílá VÝHRADNĚ po vědomém odemčení v modalu (forceEdit),
+      // nikdy automaticky z URL.
+      inv = await purchaseInvoicesApi.update(invoiceId.value, payload, forceEdit.value)
     } else {
       inv = await purchaseInvoicesApi.create(payload)
     }
@@ -754,6 +779,35 @@ function fieldErr(key: string): string | null {
       {{ error }}
     </div>
 
+    <!-- Banner odemčené editace non-draft faktury (admin, ?force=1) — zrcadlí
+         banner prodejního editoru; server ukládá audit purchase_invoice.force_updated. -->
+    <!-- Uzamčený doklad (received/booked/paid/cancelled): admin má tlačítko k odemčení -->
+    <div v-if="isLocked" class="rounded-md border border-warning-500/50 bg-warning-50 p-4">
+      <div class="flex items-start gap-3">
+        <svg class="w-5 h-5 text-warning-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 15v2m-6 4h12a2 2 0 0 0 2-2v-6a2 2 0 0 0-2-2H6a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2zm10-10V7a4 4 0 0 0-8 0v4h8z"/></svg>
+        <div class="text-sm text-warning-600 flex-1">
+          <div class="font-semibold mb-1">{{ t('purchase_invoice.locked_title', { status: editedStatus }) }}</div>
+          <p>{{ canUnlock ? t('purchase_invoice.locked_body')
+            : (editedStatus === 'cancelled' ? t('purchase_invoice.locked_body_cancelled') : t('purchase_invoice.locked_body_nonadmin')) }}</p>
+        </div>
+        <button v-if="canUnlock" type="button" @click="unlockModalOpen = true"
+          class="cursor-pointer shrink-0 h-9 px-4 bg-warning-500 hover:bg-warning-600 text-white text-sm font-medium rounded-md">
+          {{ t('purchase_invoice.force_edit') }}
+        </button>
+      </div>
+    </div>
+
+    <!-- Banner odemčené editace non-draft faktury (po potvrzení v modalu) -->
+    <div v-else-if="forceEdit && isEdit" class="rounded-md border border-warning-500/50 bg-warning-50 p-4">
+      <div class="flex items-start gap-3">
+        <svg class="w-5 h-5 text-warning-500 flex-shrink-0 mt-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M12 9v2m0 4h.01M5.07 19h13.86c1.54 0 2.5-1.67 1.73-3L13.73 4a2 2 0 0 0-3.46 0L3.34 16c-.77 1.33.19 3 1.73 3z"/></svg>
+        <div class="text-sm text-warning-600">
+          <div class="font-semibold mb-1">{{ t('purchase_invoice.force_edit_warning') }}</div>
+          <p>{{ t('purchase_invoice.force_edit_body') }}</p>
+        </div>
+      </div>
+    </div>
+
     <!-- AI extraction warning — žluté upozornění, pokud backend zaznamenal podezřelou neshodu
          mezi sumou řádků a AI-vráceným totalem (typicky: subtotal čten jako item). -->
     <div v-if="extractionWarning" class="p-3 bg-warning-50 border border-warning-500/40 rounded-md flex gap-3 items-start">
@@ -777,6 +831,9 @@ function fieldErr(key: string): string | null {
     <div v-if="!loaded" class="text-center py-12 text-neutral-500">…</div>
 
     <form v-else @submit.prevent="submit" class="space-y-5">
+      <!-- Uzamčený doklad: fieldset[disabled] vypne všechny vstupy i submit;
+           display:contents nechává grid/spacing layout beze změny. -->
+      <fieldset :disabled="isLocked" class="contents">
       <!-- DRAG & DROP PDF (jen nahoře u nové faktury, schovaný po prvním interaction) -->
       <div v-if="!isEdit && dropzoneVisible" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
         <PdfDropzone :uploading="pdfUploading" @file-dropped="onPdfDropped" @error="onPdfError" />
@@ -1387,7 +1444,33 @@ function fieldErr(key: string): string | null {
           {{ submitting ? '…' : t('purchase_invoice.actions.save') }}
         </button>
       </div>
+      </fieldset>
     </form>
+
+    <!-- Potvrzení odemčení uzamčeného dokladu — vyžaduje zaškrtnutí, ne jen OK -->
+    <Modal v-if="unlockModalOpen" :title="t('purchase_invoice.unlock_modal_title')" width-class="max-w-lg" @close="unlockModalOpen = false; unlockAck = false">
+      <p class="text-sm text-neutral-700">{{ t('purchase_invoice.unlock_modal_intro', { status: editedStatus }) }}</p>
+      <ul class="mt-3 text-sm text-neutral-700 list-disc list-inside space-y-1">
+        <li>{{ t('purchase_invoice.unlock_c_varsymbol') }}</li>
+        <li>{{ t('purchase_invoice.unlock_c_totals') }}</li>
+        <li>{{ t('purchase_invoice.unlock_c_vat_reports') }}</li>
+        <li>{{ t('purchase_invoice.unlock_c_audit') }}</li>
+      </ul>
+      <label class="mt-4 flex items-start gap-2 text-sm text-neutral-800 cursor-pointer">
+        <input v-model="unlockAck" type="checkbox" class="mt-0.5 h-4 w-4 rounded border-neutral-300 text-primary-600" />
+        <span>{{ t('purchase_invoice.unlock_ack') }}</span>
+      </label>
+      <template #footer>
+        <button type="button" @click="unlockModalOpen = false; unlockAck = false"
+          class="cursor-pointer h-9 px-4 border border-neutral-300 text-neutral-700 text-sm font-medium rounded-md hover:bg-neutral-50">
+          {{ t('common.cancel') }}
+        </button>
+        <button type="button" :disabled="!unlockAck" @click="confirmUnlock"
+          class="cursor-pointer h-9 px-4 bg-warning-500 hover:bg-warning-600 disabled:bg-neutral-300 text-white text-sm font-medium rounded-md">
+          {{ t('purchase_invoice.force_edit') }}
+        </button>
+      </template>
+    </Modal>
 
     <!-- Quick-add currency modal -->
     <div v-if="showAddCurrency" class="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4" @click.self="showAddCurrency = false">

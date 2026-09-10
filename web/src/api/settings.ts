@@ -5,6 +5,25 @@ export type SelfCopyType = 'documents' | 'reminders' | 'approvals'
 /** off = neposílat, cc/bcc = role kopie dodavatele. */
 export type SelfCopyMode = 'off' | 'cc' | 'bcc'
 
+/** Položka číselníku ČINNOSTI (CZ-NACE / c_okec) — našeptávač v daňovém nastavení. */
+export interface NaceCode {
+  /** Kanonická hodnota do `c_okec` (sekce 01–09 vede číselník bez vodicí nuly: 14800). */
+  code: string
+  /** Čitelný zápis třídy — 731100 → „73.11.00". */
+  display: string
+  name: string
+  valid_from: string
+}
+
+/** Stav uloženého CZ-NACE proti číselníku — `expired` po přechodu na NACE rev. 2.1. */
+export interface NaceResolved {
+  code: string
+  display: string
+  name: string | null
+  status: 'active' | 'expired' | 'unknown'
+  valid_to: string | null
+}
+
 export interface Supplier {
   id: number
   company_name: string
@@ -84,6 +103,10 @@ export interface Supplier {
   financial_office_code?: string | null
   workplace_code?: string | null
   cz_nace_code?: string | null
+  /** Uložený CZ-NACE přeložený přes číselník ČINNOSTI (read-only, dopočítává backend). */
+  cz_nace_resolved?: NaceResolved | null
+  /** Upozornění k CZ-NACE po uložení (expirovaný/neznámý kód) — jen v odpovědi PUT. */
+  cz_nace_warning?: string
   data_box_id?: string | null
   sest_jmeno?: string | null
   sest_prijmeni?: string | null
@@ -610,6 +633,15 @@ export const settingsApi = {
     api.put<{ type: InvoiceCounterType; next_number: number; counter: number; period: string; preview: string }>(
       '/settings/supplier/invoice-counter', { type, next_number },
     ).then(r => r.data),
+
+  /**
+   * Našeptávač CZ-NACE — vrací jen kódy platné k dnešku. ARES eviduje ještě
+   * NACE rev. 2, číselník EPO je od 1. 1. 2026 na rev. 2.1, takže prefill
+   * z ARES často přinese expirovaný kód a uživatel si tu najde nástupce.
+   * Prázdný `q` vrátí první stránku; jinak prefix kódu nebo hledání v názvu.
+   */
+  searchNaceCodes: (q: string, limit = 20) =>
+    api.get<{ items: NaceCode[] }>('/settings/nace-codes', { params: { q, limit } }).then(r => r.data.items),
 
   listCurrencies: () => api.get<CurrencyAccount[]>('/settings/currencies').then(r => r.data),
   createCurrency: (payload: Partial<CurrencyAccount>) =>

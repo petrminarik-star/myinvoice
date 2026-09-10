@@ -50,6 +50,7 @@ use MyInvoice\Action\Admin\UserAdminAction;
 use MyInvoice\Action\Settings\EmailBrandingAction;
 use MyInvoice\Action\Settings\BrandingProfilesAction;
 use MyInvoice\Action\Settings\EmailProfilesAction;
+use MyInvoice\Action\Settings\NaceCodesAction;
 use MyInvoice\Action\Settings\PdfSigningDiagnosticsAction;
 use MyInvoice\Action\Settings\SettingsAction;
 use MyInvoice\Action\Settings\SignatureDocumentSelectionAction;
@@ -62,6 +63,7 @@ use MyInvoice\Action\Dashboard\PurchaseSummaryAction;
 use MyInvoice\Action\Invoice\CancelInvoiceAction;
 use MyInvoice\Action\Invoice\CreateInvoiceAction;
 use MyInvoice\Action\Invoice\DeleteInvoiceAction;
+use MyInvoice\Action\Invoice\RebuildInvoiceSnapshotsAction;
 use MyInvoice\Action\Invoice\ExportCsvAction;
 use MyInvoice\Action\Invoice\ExportSelectedPdfAction;
 use MyInvoice\Action\Invoice\InvoiceActivityAction;
@@ -151,7 +153,10 @@ use MyInvoice\Action\Auth\ForgotPasswordAction;
 use MyInvoice\Action\Auth\LoginAction;
 use MyInvoice\Action\Auth\LogoutAction;
 use MyInvoice\Action\Auth\MeAction;
+use MyInvoice\Action\Auth\MfaStepUpAction;
+use MyInvoice\Action\Auth\PasskeyAction;
 use MyInvoice\Action\Auth\ResetPasswordAction;
+use MyInvoice\Action\Auth\SessionAction;
 use MyInvoice\Action\Auth\SetupAction;
 use MyInvoice\Action\Auth\SetupAresLookupAction;
 use MyInvoice\Action\Auth\SetupCrpDphLookupAction;
@@ -170,6 +175,7 @@ use MyInvoice\Action\Document\DocumentJobsAction;
 use MyInvoice\Action\System\HealthAction;
 use MyInvoice\Action\System\OpenApiAction;
 use MyInvoice\Action\System\VersionAction;
+use MyInvoice\Action\Admin\MyuctoUpgradeAction;
 use MyInvoice\Action\Admin\UpdateAction;
 use Slim\App;
 
@@ -188,9 +194,18 @@ final class Routes
 
         // Admin — kontrola a upgrade nové verze (M9, issue „Kontrola a upgrade")
         $app->get  ('/api/admin/update/status',  [UpdateAction::class, 'status']);
+        $app->get  ('/api/admin/update/preflight', [UpdateAction::class, 'preflight']);
         $app->post ('/api/admin/update/refresh', [UpdateAction::class, 'refresh']);
         $app->post ('/api/admin/update/trigger', [UpdateAction::class, 'trigger']);
         $app->post ('/api/admin/update/cancel',  [UpdateAction::class, 'cancel']);
+
+        // Admin — přechod na nástupce MyÚčto.cz. Vlastní endpointy, ne varianta
+        // /api/admin/update/*: jiný produkt, jiný dopad, jiný stav.
+        $app->get  ('/api/admin/myucto-upgrade/status',    [MyuctoUpgradeAction::class, 'status']);
+        $app->get  ('/api/admin/myucto-upgrade/preflight', [MyuctoUpgradeAction::class, 'preflight']);
+        $app->post ('/api/admin/myucto-upgrade/refresh',   [MyuctoUpgradeAction::class, 'refresh']);
+        $app->post ('/api/admin/myucto-upgrade/trigger',   [MyuctoUpgradeAction::class, 'trigger']);
+        $app->post ('/api/admin/myucto-upgrade/cancel',    [MyuctoUpgradeAction::class, 'cancel']);
 
         // Admin — správa ukázkových (sample) dat (issue #162); admin-only přes RoleMiddleware
         $app->get   ('/api/maintenance/sample-data', [\MyInvoice\Action\Maintenance\SampleDataAction::class, 'status']);
@@ -203,6 +218,7 @@ final class Routes
             $g->post('/setup-crpdph-lookup', SetupCrpDphLookupAction::class);  // public proxy do registru plátců DPH (účty z DIČ)
             $g->post('/setup-sample',    SetupSampleAction::class);         // public sample data generator (jen pokud nejsou data)
             $g->post('/login',           LoginAction::class);
+            $g->post('/webauthn/login/options', [LoginAction::class, 'passkeyOptions']);
             $g->post('/logout',          LogoutAction::class);
             $g->get ('/me',              MeAction::class);
             $g->get ('/api-me',          ApiMeAction::class);  // connection-test pro bearer i session
@@ -213,6 +229,26 @@ final class Routes
             $g->get ('/totp/status',     [TotpAction::class, 'status']);
             $g->post('/totp/setup',      [TotpAction::class, 'setup']);
             $g->post('/totp/enable',     [TotpAction::class, 'enable']);
+            // WebAuthn/passkeys — interní session-only self-service API
+            $g->get   ('/webauthn/credentials',              [PasskeyAction::class, 'credentials']);
+            $g->post  ('/webauthn/register/options',          [PasskeyAction::class, 'registerOptions']);
+            $g->post  ('/webauthn/register/verify',           [PasskeyAction::class, 'registerVerify']);
+            $g->post  ('/webauthn/login/verify',              [PasskeyAction::class, 'loginVerify']);
+            $g->post  ('/webauthn/step-up/options',           [PasskeyAction::class, 'stepUpOptions']);
+            $g->post  ('/webauthn/step-up/verify',            [PasskeyAction::class, 'stepUpVerify']);
+            $g->patch ('/webauthn/credentials/{id:[0-9]+}',   [PasskeyAction::class, 'rename']);
+            $g->delete('/webauthn/credentials/{id:[0-9]+}',   [PasskeyAction::class, 'revoke']);
+            $g->post  ('/mfa/step-up/totp',                   [MfaStepUpAction::class, 'totp']);
+            $g->post  ('/mfa/step-up/recovery',               [MfaStepUpAction::class, 'recovery']);
+            $g->get   ('/mfa/recovery-codes',                 [\MyInvoice\Action\Auth\MfaRecoveryCodeAction::class, 'status']);
+            $g->post  ('/mfa/recovery-codes',                 [\MyInvoice\Action\Auth\MfaRecoveryCodeAction::class, 'generate']);
+            $g->get   ('/session/status',                     [SessionAction::class, 'status']);
+            $g->post  ('/session/activity',                   [SessionAction::class, 'activity']);
+            $g->post  ('/session/lock',                       [SessionAction::class, 'lock']);
+            $g->get   ('/session/lock-preference',            [SessionAction::class, 'lockPreference']);
+            $g->put   ('/session/lock-preference',            [SessionAction::class, 'updateLockPreference']);
+            $g->post  ('/session/unlock/options',             [SessionAction::class, 'unlockOptions']);
+            $g->post  ('/session/unlock/verify',              [SessionAction::class, 'unlockVerify']);
             // API tokeny (Personal Access Tokens) — správa jen ze session auth
             $g->get   ('/tokens',                  ListTokensAction::class);
             $g->post  ('/tokens',                  CreateTokenAction::class);
@@ -325,6 +361,8 @@ final class Routes
         $app->delete ('/api/invoices/{id:[0-9]+}/payments/{paymentId:[0-9]+}', DeletePaymentAction::class);
         $app->post   ('/api/invoices/{id:[0-9]+}/payments/{paymentId:[0-9]+}/tax-document', CreatePaymentTaxDocumentAction::class);
         $app->post   ('/api/invoices/{id:[0-9]+}/cancel',    CancelInvoiceAction::class);
+        // Obnova snapshotů klienta/dodavatele z live dat (admin, i u vystavené) — BUG 5.
+        $app->post   ('/api/invoices/{id:[0-9]+}/rebuild-snapshots', RebuildInvoiceSnapshotsAction::class);
         $app->get    ('/api/invoices/{id:[0-9]+}/isdoc',     InvoiceIsdocAction::class);
         $app->get    ('/api/invoices/{id:[0-9]+}/pdf',       PdfAction::class);
         $app->get    ('/api/invoices/{id:[0-9]+}/pdfs',      ListPdfsAction::class);
@@ -409,6 +447,7 @@ final class Routes
         $app->post   ('/api/recurring/{id:[0-9]+}/pause',     [RecurringTemplateAction::class, 'pause']);
         $app->post   ('/api/recurring/{id:[0-9]+}/resume',    [RecurringTemplateAction::class, 'resume']);
         $app->post   ('/api/recurring/{id:[0-9]+}/run-now',   [RecurringTemplateAction::class, 'runNow']);
+        $app->post   ('/api/recurring/{id:[0-9]+}/reschedule', [RecurringTemplateAction::class, 'reschedule']);
 
         // Work reports — výkaz víceprací (M5)
         $app->get    ('/api/invoices/{id:[0-9]+}/work-report', GetWorkReportAction::class);
@@ -542,6 +581,9 @@ final class Routes
         $app->post   ('/api/admin/users',           [UserAdminAction::class, 'create']);
         $app->put    ('/api/admin/users/{id:[0-9]+}', [UserAdminAction::class, 'update']);
         $app->delete ('/api/admin/users/{id:[0-9]+}', [UserAdminAction::class, 'delete']);
+        // Membership uživatel ↔ supplier (jemný tenant přístup, migrace 0148)
+        $app->get    ('/api/admin/users/{id:[0-9]+}/suppliers', [\MyInvoice\Action\Admin\UserSupplierAdminAction::class, 'list']);
+        $app->put    ('/api/admin/users/{id:[0-9]+}/suppliers', [\MyInvoice\Action\Admin\UserSupplierAdminAction::class, 'replace']);
 
         // Approval inbox (admin only) — globální seznam schvalování
         $app->get    ('/api/admin/approvals',       ApprovalListAction::class);
@@ -564,6 +606,7 @@ final class Routes
         $app->put ('/api/settings/supplier',                [SettingsAction::class, 'updateSupplier']);
         $app->put ('/api/settings/supplier/invoice-counter', SupplierInvoiceCounterAction::class);
         $app->get ('/api/settings/supplier/invoice-counter', [SupplierInvoiceCounterAction::class, 'status']);
+        $app->get ('/api/settings/nace-codes',              NaceCodesAction::class);
         $app->get    ('/api/settings/email-profiles',       [EmailProfilesAction::class, 'list']);
         $app->post   ('/api/settings/email-profiles',       [EmailProfilesAction::class, 'create']);
         $app->post   ('/api/settings/email-profiles/test',  [EmailProfilesAction::class, 'testDraft']);

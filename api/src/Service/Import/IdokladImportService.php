@@ -578,7 +578,6 @@ final class IdokladImportService
         $dueDate   = (string) ($i['DateOfMaturity'] ?? $issueDate);
 
         $vatRates = $this->loadVatRateMap();
-        $defaultVatRateId = $this->matchVatRateId($vatRates, 21.0) ?? $this->matchVatRateId($vatRates, 0.0) ?? 0;
 
         // Sleva (issue #48): přijaté faktury nemají header discount_percent — slevu
         // z iDokladu (DiscountType=OnDocument) materializujeme rovnou jako zápornou
@@ -591,7 +590,7 @@ final class IdokladImportService
         $discountBaseByRate = []; // vat_rate_id => ['rate_id' => int, 'base' => float]
         foreach (($i['Items'] ?? []) as $idx => $line) {
             $rate = (float) ($line['VatRate'] ?? 0);
-            $vatRateId = $this->matchVatRateId($vatRates, $rate) ?? $defaultVatRateId;
+            $vatRateId = $this->requireVatRateId($vatRates, $rate, (int) $idx);
             $qty = (float) ($line['Amount'] ?? 1);
             $unitPrice = self::idokladNetUnitPrice($line, $rate);
             $items[] = [
@@ -810,14 +809,13 @@ final class IdokladImportService
         $dueDate   = $hdr['due_date'];
 
         $vatRates = $this->loadVatRateMap();
-        $defaultVatRateId = $this->matchVatRateId($vatRates, 21.0) ?? $this->matchVatRateId($vatRates, 0.0) ?? 0;
 
         // Položky — stejný tvar jako ReceivedInvoices (Amount/Name/Unit/VatRate + per-řádek Prices).
         // idokladNetUnitPrice() řeší i PriceType=WithVat (účtenky bývají ceny s DPH).
         $items = [];
         foreach (($i['Items'] ?? []) as $idx => $line) {
             $rate = (float) ($line['VatRate'] ?? 0);
-            $vatRateId = $this->matchVatRateId($vatRates, $rate) ?? $defaultVatRateId;
+            $vatRateId = $this->requireVatRateId($vatRates, $rate, (int) $idx);
             $items[] = [
                 'description'            => (string) ($line['Name'] ?? $line['Description'] ?? ''),
                 'quantity'               => (float) ($line['Amount'] ?? 1),
@@ -1151,6 +1149,29 @@ final class IdokladImportService
             if (abs($r - $rate) < 0.01) return $id;
         }
         return null;
+    }
+
+    /**
+     * Sazba řádku PŘIJATÉHO dokladu — nebo tvrdá chyba dokladu.
+     *
+     * Fallback na tuzemských 21 % tu být NESMÍ, i když bez `vat_rate_id` řádek poruší FK:
+     * z německých 19 % udělal českou základní sazbu a cizí daň se dostala na ř. 40 + KH B.2
+     * jako nárok na odpočet (audit VAT klasifikací, C-3a). Nenamapovaný doklad se v importu
+     * zaznamená jako chybný i s touhle hláškou, ať uživatel ví, kterou sazbu doplnit;
+     * ostatní doklady dávky pokračují dál.
+     */
+    private function requireVatRateId(array $vatRates, float $ratePercent, int $index): int
+    {
+        $id = $this->matchVatRateId($vatRates, $ratePercent);
+        if ($id === null) {
+            throw new \RuntimeException(sprintf(
+                'Položka č. %d: sazba DPH %s %% není v číselníku — cizí sazbu nelze nahradit '
+                . 'tuzemskou, doplňte ji do číselníku sazeb a import zopakujte.',
+                $index + 1,
+                rtrim(rtrim(number_format($ratePercent, 2, ',', ' '), '0'), ','),
+            ));
+        }
+        return $id;
     }
 
     /**

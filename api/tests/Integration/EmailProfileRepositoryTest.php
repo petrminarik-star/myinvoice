@@ -45,10 +45,36 @@ final class EmailProfileRepositoryTest extends TestCase
             $this->markTestSkipped('DI unavailable: ' . $e->getMessage());
         }
 
-        $this->supplierId = (int) $this->pdo->query('SELECT MIN(id) FROM supplier')->fetchColumn();
-        if ($this->supplierId <= 0) {
-            $this->markTestSkipped('No supplier');
+        $references = $this->pdo->query(
+            'SELECT
+                (SELECT id FROM countries ORDER BY id LIMIT 1) AS country_id,
+                (SELECT id FROM currencies ORDER BY id LIMIT 1) AS currency_id,
+                (SELECT id FROM vat_rates ORDER BY id LIMIT 1) AS vat_rate_id'
+        )->fetch(PDO::FETCH_ASSOC);
+        if (!is_array($references)
+            || (int) ($references['country_id'] ?? 0) <= 0
+            || (int) ($references['currency_id'] ?? 0) <= 0
+            || (int) ($references['vat_rate_id'] ?? 0) <= 0
+        ) {
+            $this->markTestSkipped('Missing supplier codebook prerequisites');
         }
+        $supplier = $this->pdo->prepare(
+            'INSERT INTO supplier
+                (company_name, street, city, zip, country_id, email,
+                 default_currency_id, default_vat_rate_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        );
+        $supplier->execute([
+            'Synthetic Email Profile Test ' . bin2hex(random_bytes(4)),
+            'Testovací 1',
+            'Praha',
+            '11000',
+            (int) $references['country_id'],
+            'email-profile-' . bin2hex(random_bytes(8)) . '@example.invalid',
+            (int) $references['currency_id'],
+            (int) $references['vat_rate_id'],
+        ]);
+        $this->supplierId = (int) $this->pdo->lastInsertId();
 
         $uid = $this->pdo->query('SELECT MIN(id) FROM users')->fetchColumn();
         $this->userId = $uid !== false && $uid !== null ? (int) $uid : null;
@@ -65,6 +91,9 @@ final class EmailProfileRepositoryTest extends TestCase
         }
         foreach ($this->createdSigningProfiles as $profileId) {
             $this->pdo->prepare('DELETE FROM signing_profiles WHERE id = ?')->execute([$profileId]);
+        }
+        if (isset($this->supplierId) && $this->supplierId > 0) {
+            $this->pdo->prepare('DELETE FROM supplier WHERE id = ?')->execute([$this->supplierId]);
         }
     }
 

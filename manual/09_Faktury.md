@@ -39,6 +39,33 @@ V každé skupině jsou faktury seřazené podle data vystavení (nejnovější 
 
 ## 9.2 Stavy faktur
 
+Ve výchozím nastavení je faktura ve splatnosti po celý den uvedený jako datum splatnosti. Mezi doklady
+**po splatnosti** patří až následující kalendářní den, pokud zůstává neuhrazená;
+teprve tehdy se také nabízí běžná upomínka. Rozhoduje datum v časové zóně aplikace
+(`app.timezone`, výchozí `Europe/Prague`), nikoli časové pásmo prohlížeče. Stejná hranice platí pro filtr
+přijatých faktur, dashboard a souhrny klientů a zakázek.
+
+Provozovatel může v `cfg.local.php` zapnout zahrnutí dnešních dokladů do označení
+a filtrů „po splatnosti“ v seznamech vystavených a přijatých faktur a do souhrnů
+dashboardu, klientů a zakázek:
+
+```php
+return [
+    'invoices' => [
+        'overdue_includes_today' => true,
+    ],
+];
+```
+
+Jde o položku instalační konfigurace; pokud už `cfg.local.php` obsahuje jiné
+volby, doplňte ji do existujícího pole. Alternativou je proměnná prostředí
+`MYINVOICE_OVERDUE_INCLUDES_TODAY=true`. Hodnota `false` vrací výchozí hranici
+a chybějící příznak znamená `false`. Po změně znovu načtěte aplikaci.
+Nastavení platí pro všechny firmy v instalaci. Nemění skutečný počet dnů
+prodlení ani pravidla upomínek: běžnou upomínku lze nabídnout a odeslat
+až následující den. Veřejný náhled faktury a pásma stáří pohledávek nadále
+pracují se skutečným prodlením.
+
 | Stav | Význam | Co lze udělat |
 |---|---|---|
 | 📝 **Koncept** (`draft`) | Rozpracovaná, neviditelná pro klienta | Editovat, smazat, vystavit |
@@ -53,7 +80,23 @@ V každé skupině jsou faktury seřazené podle data vystavení (nejnovější 
 
 > 💡 **Edituj jen koncepty.** Vystavená faktura má immutable snapshot dodavatele,
 > klienta a banky — pro změnu je třeba storno + nová faktura, nebo dobropis.
-> Admin má v krajní nouzi možnost editace s `?force=1` (s audit logem).
+> Admin má v krajní nouzi dvě cesty (obě auditované):
+>
+> 1. **Odemknout k editaci** — editor uzamčeného dokladu zobrazí výstražný pruh
+>    s tlačítkem odemčení; potvrzuje se modalem s výslovnými následky (číslo
+>    dokladu se nemění, snapshoty se přepíšou z živých dat, u už podaného KH/DPH
+>    může být nutné následné hlášení) a zaškrtnutím checkboxu. Odemčení platí
+>    jen do obnovení stránky. Do auditního logu se zapíše `invoice.force_edit`
+>    včetně seznamu změněných polí a starého/nového snapshotu.
+> 2. **Obnovit údaje klienta** (detail faktury → Pokročilé) — lehčí operace:
+>    přepíše POUZE snapshoty (klienta, **dodavatele i bankovního spojení**)
+>    z aktuálních dat; částky, stav i číslo zůstávají. Stávající PDF se zneplatní
+>    (stará verze se archivuje) a vygeneruje znovu — u dokladu v už podaném
+>    období se nové PDF může lišit od verze, kterou odběratel dostal.
+>    Pozor: akce **nemá vliv na kontrolní hlášení ani přiznání DPH** — výkazy
+>    čtou DIČ protistrany vždy z živé karty klienta, takže po změně DIČ nebo
+>    přechodu do skupinové registrace jsou správně i bez ní. Projeví se jen
+>    v PDF a v exportech (ISDOC, Pohoda). Audit `invoice.rebuild_snapshots`.
 
 ## 9.3 Hromadné akce
 

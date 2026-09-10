@@ -133,8 +133,29 @@ paths:
             application/json:
               schema:
                 type: object
+                required: [status, version, db, redis, time]
                 properties:
-                  ok: { type: boolean, example: true }
+                  status: { type: string, enum: [ok] }
+                  version: { type: string, example: "4.3.1" }
+                  db: { type: boolean }
+                  redis: { type: boolean }
+                  time: { type: string, format: date-time }
+                  warnings:
+                    type: array
+                    description: Diagnostika dostupná pouze přihlášenému uživateli.
+                    items:
+                      type: object
+                      required: [code, message]
+                      properties:
+                        code:
+                          type: string
+                          enum:
+                            - secret_encryption_key
+                            - webauthn_configuration
+                            - mfa_methods_configuration
+                            - session_lock_configuration
+                            - session_lock_without_unlock_method
+                        message: { type: string }
 
   /api/v1/version:
     get:
@@ -400,7 +421,7 @@ paths:
           schema: { type: boolean }
         - in: query
           name: filter[overdue]
-          description: Pouze po splatnosti
+          description: Pouze po splatnosti. Výchozí hranice je před dnešním dnem v časové zóně aplikace; konfigurace invoices.overdue_includes_today zahrne také dnešní splatnost.
           schema: { type: boolean }
         - in: query
           name: page
@@ -1425,8 +1446,8 @@ paths:
                       properties:
                         email: { type: string, format: email }
                         recipient: { type: string, enum: [to, cc, bcc] }
-                        source: { type: string, enum: [contact, project, main_email] }
-                        usage: { type: [string, "null"], enum: [communication, documents, reminders, approvals, null] }
+                        source: { type: string, enum: [contact, project, main_email, supplier] }
+                        usage: { type: [string, "null"], enum: [documents, reminders, approvals, null] }
                         label: { type: [string, "null"] }
         '404': { description: Faktura nenalezena }
 
@@ -1465,12 +1486,15 @@ paths:
                 bcc:
                   type: array
                   items: { type: string, format: email }
-                subject:
+                subject_override:
                   type: string
-                  description: Override předmětu emailu
-                body:
+                  description: Override předmětu emailu (jinak předmět ze šablony `invoice_send`)
+                note:
                   type: string
-                  description: Override těla (HTML); proměnné z šablony se nesubstituují
+                  maxLength: 5000
+                  description: |
+                    Volitelná poznámka do těla e-mailu (NE do PDF). Plain text;
+                    neprázdné řádky se vyrenderují jako odstavce. Delší text se ořízne na 5000 znaků.
       responses:
         '200':
           description: OK — email odeslán
@@ -1479,8 +1503,14 @@ paths:
               schema:
                 type: object
                 properties:
-                  ok: { type: boolean }
-                  recipients:
+                  sent_to:
+                    type: array
+                    description: Adresy v poli To, na které se skutečně odesílalo.
+                    items: { type: string, format: email }
+                  cc:
+                    type: array
+                    items: { type: string, format: email }
+                  bcc:
                     type: array
                     items: { type: string, format: email }
                   resolved_recipients:
@@ -1491,10 +1521,20 @@ paths:
                       properties:
                         email: { type: string, format: email }
                         recipient: { type: string, enum: [to, cc, bcc] }
-                        source: { type: string, enum: [contact, project, main_email] }
-                        usage: { type: [string, "null"], enum: [communication, documents, reminders, approvals, null] }
+                        source: { type: string, enum: [contact, project, main_email, supplier] }
+                        usage: { type: [string, "null"], enum: [documents, reminders, approvals, null] }
                         label: { type: [string, "null"] }
-                  archived_pdf_id: { type: integer, format: int64 }
+                  sent_at:
+                    type: string
+                    description: "Čas odeslání ve formátu `YYYY-MM-DD HH:MM:SS` (čas serveru)."
+                  is_test:
+                    type: boolean
+                    description: Vždy `false` u tohoto endpointu (testovací odeslání má vlastní endpoint).
+        '400':
+          description: Žádný platný příjemce (`no_recipients`) nebo neplatná adresa (`invalid_email`)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
         '409':
           description: Faktura není ve stavu pro odeslání (draft)
           content:
@@ -1734,6 +1774,32 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/v1/invoices/{id}/rebuild-snapshots:
+    parameters:
+      - $ref: '#/components/parameters/SupplierIdHeader'
+      - in: path
+        name: id
+        required: true
+        schema: { type: integer, format: int64 }
+    post:
+      tags: [InvoiceOps]
+      summary: Obnoví snapshoty klienta/dodavatele na dokladu z aktuálních live dat (admin)
+      description: |
+        Lehčí alternativa k odemčení celého formuláře: přepíše POUZE `client_snapshot` /
+        `supplier_snapshot` / `bank_snapshot` z aktuálních live dat, a to i u uzamčeného
+        (issued/sent/paid) dokladu, a zneplatní vygenerované PDF (stará verze se
+        archivuje). Částky, stav, datumy ani varsymbol se nemění. Auditováno jako
+        `invoice.rebuild_snapshots` se starým i novým snapshotem.
+
+        Akce NEMÁ vliv na kontrolní hlášení ani přiznání DPH — výkazy čtou DIČ
+        protistrany z živé tabulky `clients`, nikoli ze snapshotů. Projeví se jen
+        v obsahu PDF a exportů (ISDOC/Pohoda/Stereo).
+      responses:
+        '200':
+          description: Aktualizovaná faktura
+        '403': { description: Pouze admin }
+        '409': { description: Draft (snapshoty nepoužívá) nebo stornovaný doklad }
+
   /api/v1/invoices/{id}/cancel:
     parameters:
       - $ref: '#/components/parameters/SupplierIdHeader'
@@ -1745,28 +1811,81 @@ paths:
       tags: [InvoiceOps]
       summary: Storno vystavené faktury
       description: |
-        Vystavená faktura **nelze smazat** — storno vytvoří záporný protiklad
-        (`invoice_type = cancellation`) se stejnou částkou, který původní fakturu
-        účetně ruší. Číselná řada je zachovaná (číslo původní faktury nezmizí).
+        Vystavená faktura **nelze smazat**. Číselná řada je vždy zachovaná
+        (číslo původní faktury nezmizí). Povinný `mode` volí režim storna:
+
+        - `internal` — interní storno bez dokladu pro klienta. Vznikne protidoklad
+          `invoice_type = cancellation` (bez `varsymbol`, s nulovými částkami,
+          status `issued`), původní faktura dostane status `cancelled` a
+          `cancelled_at`. Odpověď je `200` s `cancellation_id` a stornovanou
+          původní fakturou.
+        - `credit_note` — vystaví se **draft** dobropisu (`invoice_type = credit_note`)
+          se zápornými položkami; uživatel ho musí zkontrolovat v editoru a
+          zavolat `/issue`. Původní faktura si status ponechá až do vystavení
+          dobropisu. Odpověď je `201` s `credit_note_id`.
+
+        Dobropis lze stornovat pouze v režimu `internal`. Stornovací doklad
+        (`cancellation`) stornovat nelze.
       requestBody:
+        required: true
         content:
           application/json:
             schema:
               type: object
+              required: [mode]
               properties:
+                mode:
+                  type: string
+                  enum: [internal, credit_note]
+                  description: Režim storna — interní storno vs. draft dobropisu.
                 reason:
                   type: string
-                  description: Důvod storna (audit + volitelně do PDF)
+                  description: Důvod storna (audit + poznámka nad položkami protidokladu)
       responses:
         '200':
-          description: OK
+          description: "OK — interní storno (`mode: internal`)"
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  original:     { $ref: '#/components/schemas/Invoice' }
-                  cancellation: { $ref: '#/components/schemas/Invoice' }
+                  cancellation_id:
+                    type: integer
+                    format: int64
+                    description: ID vytvořeného stornovacího dokladu (`invoice_type = cancellation`).
+                  invoice:
+                    allOf:
+                      - $ref: '#/components/schemas/Invoice'
+                    description: Původní faktura po stornu (status `cancelled`).
+        '201':
+          description: "Vytvořen draft dobropisu (`mode: credit_note`)"
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  credit_note_id: { type: integer, format: int64 }
+                  edit_url:
+                    type: string
+                    description: Relativní odkaz do editoru draftu dobropisu.
+        '400':
+          description: "Chybí nebo neplatný `mode` (`invalid_mode`)"
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '404':
+          description: Faktura nenalezena
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
+        '409':
+          description: |
+            Fakturu nelze stornovat — není vystavená/odeslaná/zaplacená (`invalid_state`),
+            jde o stornovací doklad (`invalid_type`), nebo je to dobropis
+            a `mode` není `internal` (`invalid_mode`).
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/Error' }
 
   /api/v1/invoices/{id}/clone:
     parameters:
@@ -2112,11 +2231,14 @@ paths:
         schema: { type: integer, format: int64 }
     post:
       tags: [Bank]
-      summary: Ručně přiřadí transakci k faktuře (a označí ji paid)
+      summary: Ručně přiřadí transakci k faktuře a zaeviduje úhradu
       description: |
         Použij když automatický matching nezachytil platbu (variabilní symbol
-        chybí nebo neodpovídá). Označí transakci jako `matched`, fakturu jako
-        `paid` s `paid_at = transaction.posted_at`.
+        chybí nebo neodpovídá). Zaeviduje platbu v měně faktury; plné pokrytí
+        ji označí jako `paid` s `paid_at = transaction.posted_at`, nižší platba
+        zůstane částečnou úhradou. U CZK platby cizoměnové faktury odpovídající
+        celému zbytku se v platbě uloží celý zbytek v měně faktury; přesná CZK
+        částka zůstává na bankovní transakci.
       requestBody:
         required: true
         content:
@@ -2311,6 +2433,38 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/Error' }
 
+  /api/v1/settings/nace-codes:
+    get:
+      tags: [Settings]
+      summary: Našeptávač CZ-NACE (číselník ČINNOSTI)
+      description: |
+        Vyhledávání v číselníku ČINNOSTI (zkratka OKEC) Daňového portálu, proti
+        kterému EPO validuje atribut `c_okec` v přiznání k DPH. Vrací **jen kódy
+        platné k dnešku**: číselník se k 1. 1. 2026 překlopil na NACE rev. 2.1 a
+        starším kódům nastavil konec platnosti, takže klasifikace převzatá z ARES
+        (rev. 2) může být už neplatná a portál ji odmítne propustnou chybou 30.
+
+        Hledá se podle čísel v dotazu jako **prefix kódu** (`73`, `73.11`,
+        i `01.48` pro sekce 01–09, které číselník vede bez vodicí nuly), jinak
+        podle **názvu činnosti** bez ohledu na velikost písmen a diakritiku.
+        Prázdný `q` vrátí první stránku číselníku.
+
+        Hodnota `code` je to, co se ukládá do `cz_nace_code` dodavatele.
+      parameters:
+        - { in: query, name: q, schema: { type: string }, description: 'Prefix kódu nebo část názvu činnosti' }
+        - { in: query, name: limit, schema: { type: integer, minimum: 1, maximum: 100, default: 20 } }
+      responses:
+        '200':
+          description: Nalezené položky číselníku
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  items:
+                    type: array
+                    items: { $ref: '#/components/schemas/NaceCode' }
+
   /api/v1/settings/supplier/logo:
     parameters:
       - $ref: '#/components/parameters/SupplierIdHeader'
@@ -2386,10 +2540,17 @@ paths:
   /api/v1/suppliers:
     get:
       tags: [Settings]
-      summary: Seznam všech dodavatelů, ke kterým má token přístup
+      summary: Seznam dodavatelů, ke kterým má token přístup
       description: |
         Užitečné pro klienta, který chce zjistit `id` supplier-ů (pro X-Supplier-Id
         header u tokenu bez bind, nebo pro multi-supplier reporting).
+
+        **Přístup k firmám (`user_suppliers`):** pokud má uživatel alespoň jedno
+        přiřazení, vrací se JEN přiřazené firmy. Uživatel bez přiřazení (typicky
+        vlastník jednofiremní instalace) a role `admin` vidí všechny firmy —
+        zpětně kompatibilní chování. Požadavek s `X-Supplier-Id` mimo přiřazené
+        firmy vrací `403` s kódem `forbidden_supplier`; stejně tak token vázaný
+        (bound) na nepovolenou firmu.
       responses:
         '200':
           description: OK
@@ -2401,6 +2562,8 @@ paths:
                   items:
                     type: array
                     items: { $ref: '#/components/schemas/SupplierBrief' }
+        '403':
+          description: "Firma mimo přiřazené (`forbidden_supplier`)"
 
   /api/v1/suppliers/{id}:
     parameters:
@@ -2411,12 +2574,17 @@ paths:
     get:
       tags: [Settings]
       summary: Detail konkrétního dodavatele
+      description: |
+        Firma mimo přiřazené (`user_suppliers`) vrací `404` — konvence pro cizí
+        entity, neleakuje existenci.
       responses:
         '200':
           description: OK
           content:
             application/json:
               schema: { $ref: '#/components/schemas/SupplierFull' }
+        '404':
+          description: Dodavatel nenalezen (nebo mimo přiřazené firmy)
 
   /api/v1/settings/currencies:
     parameters:
@@ -3200,6 +3368,7 @@ paths:
           schema: { type: boolean }
         - in: query
           name: filter[overdue]
+          description: Pouze po splatnosti. Výchozí hranice je před dnešním dnem v časové zóně aplikace; konfigurace invoices.overdue_includes_today zahrne také dnešní splatnost.
           schema: { type: boolean }
         - in: query
           name: q
@@ -3539,7 +3708,11 @@ paths:
         - { in: query, name: quarter, schema: { type: integer, minimum: 1, maximum: 4 }, description: 'Pro kvartální periodu' }
       responses:
         '200':
-          description: JSON summary (lines 1-29 + 40+, totals, deadline)
+          description: |
+            JSON summary (lines 1-29 + 40+, totals, deadline) + warnings[] (doporučená
+            pole identifikace, propustné chyby EPO) + missing[] (chybějící XSD-povinná
+            pole identifikace). Náhled se nikdy neblokuje — missing[] jen znamená, že
+            stažení XML vrátí 422.
           content:
             application/json:
               schema: { type: object }
@@ -3554,11 +3727,17 @@ paths:
         - { in: query, name: year, required: true, schema: { type: integer } }
         - { in: query, name: month, schema: { type: integer } }
         - { in: query, name: quarter, schema: { type: integer } }
+        - { in: query, name: form, schema: { type: string, enum: [B, O], default: B },
+            description: 'Forma podání (dapdph_forma): B řádné, O opravné (§ 138 DŘ). Dodatečné D/E dočasně nepodporováno — § 141/2 DŘ vyžaduje vykázání rozdílů proti poslední známé dani a builder umí jen plné hodnoty období.' }
+        - { in: query, name: d_zjist, schema: { type: string, pattern: '^\d{2}\.\d{2}\.\d{4}$' },
+            description: 'Datum zjištění důvodů pro podání (DD.MM.YYYY) — volitelné u O' }
       responses:
         '200':
           description: XML download
           content:
             application/xml: {}
+        '400': { description: Neplatná forma podání nebo chybějící/neplatné d_zjist }
+        '422': { description: 'epo_identity_incomplete — chybí XSD-povinná EPO identifikace (kód FÚ, DIČ, typ poplatníka); tělo obsahuje missing[] a settings_url' }
         '403': { description: Pouze admin/accountant }
 
   /api/v1/reports/dphkh1/preview:
@@ -3572,7 +3751,7 @@ paths:
         - { in: query, name: year,  required: true, schema: { type: integer } }
         - { in: query, name: month, required: true, schema: { type: integer, minimum: 1, maximum: 12 } }
       responses:
-        '200': { description: Summary s counts sekcí A.1/A.2/A.4/A.5/B.1/B.2/B.3 }
+        '200': { description: 'Summary s counts sekcí A.1/A.2/A.4/A.5/B.1/B.2/B.3 + warnings[] + missing[] (chybějící XSD-povinná pole identifikace; náhled se neblokuje, stažení XML vrátí 422)' }
         '403': { description: Pouze admin/accountant }
 
   /api/v1/reports/dphkh1:
@@ -3583,11 +3762,17 @@ paths:
         - $ref: '#/components/parameters/SupplierIdHeader'
         - { in: query, name: year,  required: true, schema: { type: integer } }
         - { in: query, name: month, required: true, schema: { type: integer } }
+        - { in: query, name: form, schema: { type: string, enum: [B, O, N, E], default: B },
+            description: 'Forma podání (khdph_forma): B řádné, O opravné, N následné, E následné/opravné (§ 101e–101f ZDPH)' }
+        - { in: query, name: d_zjist, schema: { type: string, pattern: '^\d{2}\.\d{2}\.\d{4}$' },
+            description: 'Datum zjištění důvodů pro podání (DD.MM.YYYY) — povinné u form=N/E, volitelné u O' }
       responses:
         '200':
           description: XML download
           content:
             application/xml: {}
+        '400': { description: Neplatná forma podání nebo chybějící/neplatné d_zjist }
+        '422': { description: 'epo_identity_incomplete — chybí XSD-povinná EPO identifikace (kód FÚ, DIČ, typ poplatníka); tělo obsahuje missing[] a settings_url' }
 
   /api/v1/reports/dphshv/preview:
     get:
@@ -3601,7 +3786,7 @@ paths:
         - { in: query, name: year,  required: true, schema: { type: integer } }
         - { in: query, name: month, required: true, schema: { type: integer } }
       responses:
-        '200': { description: "Summary s řádky (country, vat_id, sh_type, amount, count)" }
+        '200': { description: "Summary s řádky (country, vat_id, sh_type, amount, count) + warnings[] + missing[] (chybějící XSD-povinná pole identifikace; náhled se neblokuje, stažení XML vrátí 422)" }
 
   /api/v1/reports/dphshv:
     get:
@@ -3616,6 +3801,7 @@ paths:
           description: XML download
           content:
             application/xml: {}
+        '422': { description: 'epo_identity_incomplete — chybí XSD-povinná EPO identifikace (kód FÚ, DIČ, typ poplatníka); tělo obsahuje missing[] a settings_url' }
 
   /api/v1/reports/income-tax/preview:
     get:
@@ -3903,8 +4089,10 @@ paths:
       description: |
         Přepíše výchozí konstanty pro daný rok. Tělo lze poslat buď jako plochý
         objekt, nebo zabalené v `{ "data": { ... } }`. Skalární klíče jsou povinné
-        (sazby, limity), vnořené (`pausal_annual`, `band_ceilings`, `expense_caps`,
-        `child_credits`) musí být objekty/pole.
+        (sazby, limity), vnořené (`band_ceilings`, `expense_caps`, `child_credits`)
+        musí být objekty/pole. Paušální daň se posílá jako rozvrh měsíčních záloh
+        `pausal_monthly` (roční `pausal_annual` je odvozená a neukládá se; přijme se
+        jen kvůli zpětné kompatibilitě, když rozvrh chybí).
       requestBody:
         required: true
         content:
@@ -4824,7 +5012,8 @@ paths:
                 properties:
                   id: { type: integer, format: int64 }
                   is_vat_payer: { type: boolean }
-                  source: { type: string, enum: [ares, vies, unknown] }
+                  source: { type: string, enum: [ares, vies, crpdph, unknown],
+                            description: 'crpdph = skupinová registrace (CZ699…) ověřená v registru plátců DPH, VIES ji nezná' }
                   ic: { type: [string, "null"] }
                   dic: { type: [string, "null"] }
         '404':
@@ -5433,7 +5622,6 @@ components:
         - vat_rate_standard
         - vat_rate_reduced
         - kh_item_threshold
-        - pausal_annual
         - band_ceilings
         - expense_caps
         - child_credits
@@ -5458,9 +5646,28 @@ components:
         vat_rate_standard: { type: number, description: "Základní sazba DPH (%) — sloupce DPH výkazů, samovyměření RC, auto-klasifikace" }
         vat_rate_reduced: { type: number, description: Snížená sazba DPH (%) }
         kh_item_threshold: { type: number, description: "Limit KH (Kč vč. DPH) — nad limit doklad jednotlivě (A.4/B.2), do limitu sumace (A.5/B.3)" }
+        pausal_monthly:
+          type: array
+          description: |
+            Rozvrh měsíčních záloh paušální daně. Segment platí od `from` (vždy 1. den
+            měsíce daného roku, první musí být 1. 1.), dokud ho nevystřídá další —
+            sazba se může změnit uprostřed roku (2026: 1. pásmo 9 984 → 9 162 Kč
+            od 1. 7.). Roční částka `pausal_annual` je z rozvrhu odvozená a neukládá se.
+            Starší klienti smí místo rozvrhu poslat `pausal_annual` (bere se doslova).
+          items:
+            type: object
+            required: [from, band1, band2, band3]
+            properties:
+              from: { type: string, format: date, example: '2026-07-01' }
+              band1: { type: number, description: Měsíční záloha 1. pásma (Kč) }
+              band2: { type: number }
+              band3: { type: number }
         pausal_annual:
           type: object
-          description: Měsíční/roční částky paušální daně per pásmo
+          description: |
+            Roční částky paušální daně per pásmo. Ve výstupu ODVOZENÉ ze součtu
+            dvanácti měsíčních záloh roku; na vstupu se přijímají jen tehdy, není-li
+            poslaný `pausal_monthly` (zpětná kompatibilita).
         band_ceilings:
           type: object
           description: Stropy obratu pro pásma paušální daně
@@ -5777,8 +5984,8 @@ components:
                   currency: { type: string }
                   unpaid_total:  { type: number, format: float }
                   unpaid_count:  { type: integer }
-                  overdue_total: { type: number, format: float }
-                  overdue_count: { type: integer }
+                  overdue_total: { type: number, format: float, description: "Dluh po splatnosti; invoices.overdue_includes_today zahrne také dnešní doklady (výchozí false)." }
+                  overdue_count: { type: integer, description: "Počet dokladů po splatnosti; invoices.overdue_includes_today zahrne také dnešní doklady (výchozí false)." }
 
     ClientInput:
       type: object
@@ -6123,8 +6330,8 @@ components:
                   currency: { type: string, example: CZK }
                   unpaid_total:  { type: number, format: float }
                   unpaid_count:  { type: integer }
-                  overdue_total: { type: number, format: float }
-                  overdue_count: { type: integer }
+                  overdue_total: { type: number, format: float, description: "Dluh po splatnosti; invoices.overdue_includes_today zahrne také dnešní doklady (výchozí false)." }
+                  overdue_count: { type: integer, description: "Počet dokladů po splatnosti; invoices.overdue_includes_today zahrne také dnešní doklady (výchozí false)." }
 
     ProjectInput:
       type: object
@@ -6308,21 +6515,31 @@ components:
 
     ViesLookupResult:
       type: object
+      description: |
+        Výsledek ověření DIČ. Pozor: české DIČ skupinové registrace (CZ699…) VIES
+        nezná, takže se ověřuje v registru plátců DPH (`source: crpdph`) — ten
+        vrací platnost, ale NE název ani adresu subjektu (`name`/`address` prázdné,
+        `parsed` null). Nedostupný registr/VIES je měkká chyba: `valid: false`
+        se `source: error` (neznamená neplatné DIČ).
       properties:
         valid: { type: boolean }
-        vat_id: { type: string, example: "DE123456789" }
-        country_code: { type: string, example: "DE" }
+        vat_number: { type: string, example: "DE123456789" }
+        country: { type: string, example: "DE" }
         name: { type: [string, "null"] }
         address: { type: [string, "null"] }
-        consultation_number:
-          type: [string, "null"]
-          description: |
-            VIES consultation number — důkazní záznam pro daňovou kontrolu, že DIČ
-            byl k danému datu platný.
-        request_date: { type: string, format: date-time }
+        parsed:
+          type: [object, "null"]
+          description: Rozparsovaná adresa, pokud ji zdroj vrátil.
+          properties:
+            street: { type: string }
+            city: { type: string }
+            zip: { type: string }
+        group_registration:
+          type: boolean
+          description: True u DIČ skupinové registrace (CZ699…), ověřeno v registru plátců DPH.
         source:
           type: string
-          enum: [fresh, cache]
+          enum: [cache, rest, soap, ares, crpdph, error]
 
     ActivityLogEntry:
       type: object
@@ -6381,7 +6598,7 @@ components:
                   this_year_project_count: { type: integer, description: "DISTINCT zakázky v této měně (letos)" }
                   prev_year_project_count: { type: integer }
             issued_count_ytd: { type: integer }
-            overdue_count: { type: integer }
+            overdue_count: { type: integer, description: "Počet dokladů po splatnosti; invoices.overdue_includes_today zahrne také dnešní doklady (výchozí false)." }
             overdue_per_currency:
               type: array
               items:
@@ -6396,6 +6613,7 @@ components:
               additionalProperties: { type: integer }
         overdue:
           type: array
+          description: Neuhrazené doklady po splatnosti v časové zóně aplikace; invoices.overdue_includes_today zahrne také dnešní doklady (výchozí false).
           items: { $ref: '#/components/schemas/Invoice' }
         unpaid_upcoming:
           type: array
@@ -6864,6 +7082,11 @@ components:
         taxpayer_type: { type: [string, "null"], enum: [fo, po, null], description: "Fyzická / právnická osoba (EPO výkazy)" }
         vat_period: { type: [string, "null"], enum: [monthly, quarterly, null] }
         financial_office_code: { type: [string, "null"], description: "Kód FÚ pro EPO (= CRPDPH cisloFu)" }
+        cz_nace_code: { type: [string, "null"], description: "Hlavní ekonomická činnost (c_okec v DPHDP3) v kanonické podobě číselníku ČINNOSTI — ukládá se přes PUT /api/v1/settings/supplier, vstup se kanonizuje (73.11 → 731100)" }
+        cz_nace_resolved:
+          allOf:
+            - $ref: '#/components/schemas/NaceResolved'
+          description: "Read-only překlad `cz_nace_code` přes číselník ČINNOSTI (název činnosti + platnost); null u prázdného kódu."
         flat_tax_band: { type: string, enum: [none, band1, band2, band3], description: "Pásmo paušální daně" }
         email_branding_enabled: { type: boolean }
         email_accent_color: { type: string, example: "#3B2D83" }
@@ -6885,6 +7108,35 @@ components:
         created_at: { type: string, format: date-time }
         updated_at: { type: string, format: date-time }
 
+    NaceCode:
+      type: object
+      description: Položka číselníku ČINNOSTI (OKEC) platná k dnešku — výsledek našeptávače CZ-NACE.
+      properties:
+        code:
+          type: string
+          example: "731100"
+          description: |
+            Kanonická hodnota číselníku — tohle se ukládá do `cz_nace_code`
+            a posílá jako `c_okec`. Sekce 01–09 vede číselník numericky bez
+            vodicí nuly (`14800` = 01.48.00).
+        display: { type: string, example: "73.11.00", description: "Čitelný zápis třídy NACE" }
+        name: { type: string, example: "Činnosti reklamních agentur" }
+        valid_from: { type: string, format: date, example: "2026-01-01", description: "Začátek platnosti položky v číselníku" }
+
+    NaceResolved:
+      type: object
+      description: |
+        Uložený CZ-NACE přeložený přes číselník ČINNOSTI. `expired` znamená, že
+        kód po přechodu číselníku na NACE rev. 2.1 (1. 1. 2026) skončil a EPO
+        na něj nahlásí propustnou chybu 30; `unknown` = kód není ve snapshotu
+        číselníku (může jít o novou hodnotu). Ani jedno podání neblokuje.
+      properties:
+        code: { type: string, example: "620200" }
+        display: { type: string, example: "62.02.00" }
+        name: { type: [string, "null"], example: "Poradenství v oblasti informačních technologií" }
+        status: { type: string, enum: [active, expired, unknown] }
+        valid_to: { type: [string, "null"], format: date, example: "2025-12-31" }
+
     ProjectsPagination:
       type: object
       properties:
@@ -6900,7 +7152,7 @@ components:
         id: { type: integer, format: int64 }
         invoice_id: { type: integer, format: int64 }
         paid_on: { type: string, format: date }
-        amount: { type: number, format: float, description: "Částka v měně faktury (> 0)" }
+        amount: { type: number, format: float, description: "Částka v měně faktury (> 0). U úplné FX úhrady jde o vypořádaný zbytek faktury; skutečnou částku a měnu bankovního pohybu nese navázaná BankTransaction." }
         currency: { type: string, example: CZK, description: "Denormalizovaný kód měny faktury v okamžiku platby" }
         variable_symbol: { type: [string, "null"] }
         bank_reference: { type: [string, "null"] }

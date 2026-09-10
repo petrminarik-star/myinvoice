@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace MyInvoice\Repository;
 
 use MyInvoice\Infrastructure\Database\Connection;
+use MyInvoice\Service\Tax\PausalSchedule;
 use MyInvoice\Service\Tax\TaxConstants;
 
 /**
@@ -33,7 +34,7 @@ final class TaxConstantsRepository
     {
         $override = $this->override($year);
         if ($override !== null) {
-            return array_replace(TaxConstants::forYear($year), $override);
+            return $this->merge(TaxConstants::forYear($year), $override, $year);
         }
         if (in_array($year, TaxConstants::availableYears(), true)) {
             return TaxConstants::forYear($year);
@@ -41,7 +42,28 @@ final class TaxConstantsRepository
         $fallback = $this->nearestKnownYear($year);
         $default = TaxConstants::forYear($fallback);
         $fallbackOverride = $this->override($fallback);
-        return $fallbackOverride !== null ? array_replace($default, $fallbackOverride) : $default;
+        return $fallbackOverride !== null ? $this->merge($default, $fallbackOverride, $year) : $default;
+    }
+
+    /**
+     * Sloučení defaultu s override + přepočet odvozených klíčů.
+     *
+     * `pausal_annual` je odvozená hodnota z `pausal_monthly`, takže se po merge
+     * VŽDY přepočítá — jinak by ji uložený (a po legislativní změně zastaralý)
+     * override tiše přebil. Override, který zná jen roční částky (uložený starší
+     * verzí aplikace), si svoji roční hodnotu ponechá; rozvrh se k ní jen dopočítá.
+     *
+     * @param array<string,mixed> $default
+     * @param array<string,mixed> $override
+     * @return array<string,mixed>
+     */
+    private function merge(array $default, array $override, int $year): array
+    {
+        $legacy = !isset($override['pausal_monthly']) && isset($override['pausal_annual']);
+        if ($legacy) {
+            unset($default['pausal_monthly']);
+        }
+        return TaxConstants::withDerived(array_replace($default, $override), $year);
     }
 
     /**
@@ -122,7 +144,7 @@ final class TaxConstantsRepository
                 // Merge jako forYear() — starý override nesmí v editoru "ztratit"
                 // později přidané konstanty.
                 'data'        => $override !== null
-                    ? array_replace(TaxConstants::forYear($year), $override)
+                    ? $this->merge(TaxConstants::forYear($year), $override, $year)
                     : TaxConstants::forYear($year),
             ];
         }
@@ -131,11 +153,18 @@ final class TaxConstantsRepository
 
     /**
      * Uloží/přepíše override pro rok.
+     *
+     * Je-li přítomný rozvrh měsíčních záloh, roční částka se NEUKLÁDÁ — je
+     * odvozená a uložená kopie by se po další změně sazby rozešla s realitou.
      * @param array<string,mixed> $data
      */
     public function upsert(int $year, array $data): void
     {
         $data['year'] = $year; // konzistence s klíčem
+        if (isset($data['pausal_monthly'])) {
+            $data['pausal_monthly'] = PausalSchedule::normalize($data['pausal_monthly']);
+            unset($data['pausal_annual']);
+        }
         $json = (string) json_encode($data, JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
         $this->db->pdo()->prepare(
             'INSERT INTO tax_constants (year, data) VALUES (?, ?)

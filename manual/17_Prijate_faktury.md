@@ -220,7 +220,7 @@ Po uložení / přechodu na detail:
   - Z received: Označit jako zaúčtované / uhrazené / Stornovat
   - Z booked: Označit jako uhrazené / Stornovat
 - „**Označit jako uhrazené**" otevře modální okno s výběrem **data úhrady** (předvyplněno dneškem) — datum se zapíše do záznamu faktury.
-- Tlačítko **Upravit** je dostupné jen u draft. Po označení jako přijatá je doklad immutable (kromě admin override `?force=1` u received).
+- Tlačítko **Upravit** je dostupné jen u draft. Po označení jako přijatá je doklad uzamčený — editor zobrazí výstražný pruh a admin ho může **Odemknout k editaci** (potvrzovací modal s výslovnými následky + checkbox; odemčení platí jen do obnovení stránky, audit `purchase_invoice.force_edit` s diffem změněných polí). Stornovaný doklad odemknout nelze.
 - Tlačítko **Smazat** je dostupné jen u draft. Pro pozdější stavy použij Stornovat.
 - Tlačítko **Zaplatit pomocí QR** (u nezaplacených faktur s kladnou částkou k úhradě) — zobrazí QR platbu dodavateli, viz [§ 17.3.2](#1732-zaplatit-pomoci-qr).
 
@@ -334,7 +334,7 @@ přidáme oddělený view **Dodavatelé** pro `is_vendor=1`.
 Akce s přijatými fakturami jsou logované v aktivním logu (Systém → Log):
 
 - `purchase_invoice.created`
-- `purchase_invoice.updated` / `force_updated`
+- `purchase_invoice.updated` / `force_edit` (editace po odemčení — payload nese seznam změněných polí a starý/nový snapshot dodavatele)
 - `purchase_invoice.items_updated`
 - `purchase_invoice.exchange_rate_set`
 - `purchase_invoice.transitioned` (s payloadem `{from, to}`)

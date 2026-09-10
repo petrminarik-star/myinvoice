@@ -414,17 +414,30 @@ final class FakturoidImportService
         $dueDate   = (string) ($e['due_on'] ?? $issueDate);
 
         $vatRates = $this->loadVatRateMap();
-        $defaultVatRateId = $this->matchVatRateId($vatRates, 21.0) ?? $this->matchVatRateId($vatRates, 0.0) ?? 0;
 
         $items = [];
         foreach (($e['lines'] ?? []) as $idx => $line) {
             $rate = (float) ($line['vat_rate'] ?? 0);
+            // Nenamapovanou sazbu doklad ODMÍTNE, nefallbackuje na tuzemských 21 %.
+            // Fallback tady dřív z německých 19 % udělal českou základní sazbu, takže se
+            // cizí daň dostala na ř. 40 + KH B.2 jako nárok na odpočet (audit VAT
+            // klasifikací, C-3a). Import doklad zaznamená jako chybný s touhle hláškou
+            // v logu úlohy a pokračuje dalšími — ostatní doklady tím netrpí.
+            $vatRateId = $this->matchVatRateId($vatRates, $rate);
+            if ($vatRateId === null) {
+                throw new \RuntimeException(sprintf(
+                    'Položka č. %d: sazba DPH %s %% není v číselníku — cizí sazbu nelze '
+                    . 'nahradit tuzemskou, doplňte ji do číselníku sazeb a import zopakujte.',
+                    $idx + 1,
+                    rtrim(rtrim(number_format($rate, 2, ',', ' '), '0'), ','),
+                ));
+            }
             $items[] = [
                 'description'            => (string) ($line['name'] ?? ''),
                 'quantity'               => (float) ($line['quantity'] ?? 1),
                 'unit'                   => (string) ($line['unit_name'] ?? 'ks'),
                 'unit_price_without_vat' => (float) ($line['unit_price'] ?? 0),
-                'vat_rate_id'            => $this->matchVatRateId($vatRates, $rate) ?? $defaultVatRateId,
+                'vat_rate_id'            => $vatRateId,
                 'order_index'            => $idx,
             ];
         }
@@ -607,15 +620,16 @@ final class FakturoidImportService
     }
 
     /**
-     * Stáhne přílohu výdaje (originální doklad od dodavatele) z Fakturoid `attachment`
-     * URL a uloží jako PDF přijaté faktury. Symetrické k iDokladu.
+     * Stáhne přílohu výdaje (originální doklad od dodavatele) z Fakturoid a uloží
+     * jako PDF přijaté faktury. Symetrické k iDokladu. Viz issue #261 —
+     * Fakturoid vrací přílohy v poli `attachments`, ne ve skalárním `attachment`.
      */
     private function archiveExpensePdf(int $supplierId, int $purchaseInvoiceId, array $exp): void
     {
-        $url = (string) ($exp['attachment'] ?? '');
-        if ($url === '') return; // výdaj bez přílohy
+        $attachment = FakturoidExpenseAttachment::resolve($exp);
+        if ($attachment === null) return; // výdaj bez přílohy
 
-        $pdf = $this->fakturoid->downloadAttachment($supplierId, $url);
+        $pdf = $this->fakturoid->downloadAttachment($supplierId, $attachment['download_url']);
         if ($pdf === null) return;
 
         $archiveRoot = (string) $this->config->get('purchase_invoice.archive_storage', '');
@@ -630,8 +644,7 @@ final class FakturoidImportService
         if (!is_file($diskPath)) @file_put_contents($diskPath, $pdf);
 
         $relPath = \MyInvoice\Service\Import\PurchaseInvoicePdfArchiver::shardedRelPath($supplierId, $sha);
-        $name = ((string) ($exp['number'] ?? 'expense')) . '.pdf';
-        $this->purchaseRepo->setPdfMetadata($purchaseInvoiceId, $supplierId, $relPath, $sha, strlen($pdf), $name);
+        $this->purchaseRepo->setPdfMetadata($purchaseInvoiceId, $supplierId, $relPath, $sha, strlen($pdf), $attachment['filename']);
     }
 
     private function loadBookmark(int $supplierId): ?string

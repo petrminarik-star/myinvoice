@@ -1523,7 +1523,7 @@ final class BankStatementAction
                 $tol = $absTol;
             } elseif ($txCcy === $local) {
                 // Cizoměnová faktura placená v CZK → přepočet kurzem faktury (CZK = částka × kurz).
-                $expected = $invMag * $rate;
+                $expected = round($invMag * $rate, 2);
                 $tol = max($absTol, $expected * $pct);
                 $converted = $expected;
             } elseif ($allowRawAmountFallback) {
@@ -1827,7 +1827,7 @@ final class BankStatementAction
         // Cizoměnová faktura placená v CZK → přepočet kurzem faktury. Bez platného kurzu
         // NEpřevádíme (žádný tichý fallback 1:1 — to by vyrobilo nesmyslnou částku platby).
         if ($txCcy === 'CZK' && $rate > 0) {
-            return $remaining * $rate;
+            return round($remaining * $rate, 2);
         }
         return null;
     }
@@ -2045,12 +2045,23 @@ final class BankStatementAction
             $partialPayment = false;
             if (in_array($invoice['status'], ['issued', 'sent', 'reminded'], true)) {
                 $remaining = round((float) ($invoice['amount_to_pay'] ?? 0) - (float) ($invoice['paid_total'] ?? 0), 2);
+                $txAmount = (float) ($txRow['amount'] ?? 0);
+                $txCurrency = isset($txRow['tx_currency']) && $txRow['tx_currency'] !== null
+                    ? (string) $txRow['tx_currency']
+                    : null;
                 $invAmount = $this->txAmountInInvoiceCurrency(
-                    (float) ($txRow['amount'] ?? 0),
+                    $txAmount,
                     (string) ($invoice['currency'] ?? 'CZK'),
                     (float) ($invoice['exchange_rate'] ?? 0),
-                    isset($txRow['tx_currency']) && $txRow['tx_currency'] !== null ? (string) $txRow['tx_currency'] : null,
+                    $txCurrency,
                     $remaining,
+                    $this->isFullFxSettlement(
+                        $txAmount,
+                        $remaining,
+                        (string) ($invoice['currency'] ?? 'CZK'),
+                        (float) ($invoice['exchange_rate'] ?? 0),
+                        $txCurrency,
+                    ),
                 );
 
                 // Idempotence: transakce už mohla platbu založit (legacy auto_partial flag
@@ -2150,20 +2161,61 @@ final class BankStatementAction
 
     /**
      * Částka transakce v měně faktury (mirror StatementMatcher::txAmountInInvoiceCurrency):
-     * stejná/neznámá měna → přímo; CZK platba cizoměnové faktury → děleno kurzem faktury;
-     * jinak $fallback (zbývající částka — manuální match = uživatel říká „tahle platba
-     * patří k téhle faktuře", bez převoditelné měny bereme doplacení zbytku).
+     * stejná/neznámá měna → přímo; úplná FX úhrada → celý zbytek faktury;
+     * částečná CZK platba cizoměnové faktury → děleno kurzem faktury. Jiná
+     * nepřevoditelná kombinace použije $fallback, protože manuální match potvrzuje vazbu.
      */
-    private function txAmountInInvoiceCurrency(float $txAmount, string $invCcy, float $rate, ?string $txCurrency, float $fallback): float
+    private function txAmountInInvoiceCurrency(
+        float $txAmount,
+        string $invCcy,
+        float $rate,
+        ?string $txCurrency,
+        float $fallback,
+        bool $settleRemaining = false,
+    ): float
     {
         if ($txCurrency === null || strtoupper($txCurrency) === strtoupper($invCcy)) {
             return round($txAmount, 2);
+        }
+        if ($settleRemaining) {
+            return round($fallback, 2);
         }
         if (strtoupper($txCurrency) === 'CZK') {
             $r = $rate > 0 ? $rate : 1.0;
             return round($txAmount / $r, 2);
         }
         return round($fallback, 2);
+    }
+
+    /**
+     * Ručně potvrzená CZK platba vypořádá celý cizoměnový zbytek jen tehdy,
+     * když se vejde do stejné 4% FX tolerance jako nabídka kandidátů. Výrazně nižší
+     * platba zůstává částečnou úhradou přepočtenou kurzem faktury.
+     */
+    private function isFullFxSettlement(
+        float $txAmount,
+        float $remaining,
+        string $invCcy,
+        float $rate,
+        ?string $txCurrency,
+    ): bool
+    {
+        if ($txAmount <= 0.0 || $remaining <= 0.0 || $txCurrency === null) {
+            return false;
+        }
+        $txCcy = strtoupper($txCurrency);
+        if ($txCcy === strtoupper($invCcy)) {
+            return false;
+        }
+        $expected = $this->remainingInTxCurrency($remaining, $invCcy, $rate, $txCcy);
+        if ($expected === null) {
+            return false;
+        }
+        $tolerance = max(
+            self::CANDIDATE_AMOUNT_TOLERANCE,
+            abs($expected) * self::CANDIDATE_FX_TOLERANCE_PCT,
+        );
+        return abs($txAmount - $expected) <= $tolerance;
     }
 
     /**

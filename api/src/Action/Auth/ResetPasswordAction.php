@@ -67,6 +67,8 @@ final class ResetPasswordAction
         try {
             $pdo->prepare('UPDATE users SET password_hash = ? WHERE id = ?')->execute([$hash, $userId]);
             $pdo->prepare('UPDATE password_resets SET used_at = NOW() WHERE id = ?')->execute([(int) $row['id']]);
+            $pdo->prepare('DELETE FROM trusted_devices WHERE user_id = ?')->execute([$userId]);
+            $pdo->prepare('DELETE FROM login_otps WHERE user_id = ?')->execute([$userId]);
             $pdo->commit();
         } catch (\PDOException $e) {
             $pdo->rollBack();

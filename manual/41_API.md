@@ -28,10 +28,17 @@ K dispozici jsou **tři varianty** stejné dokumentace nad jedním OpenAPI spece
      k datům jiných firem.
    - **Rozsah** — `read` (jen GET) nebo `read & write` (plné API).
    - **Expirace** — volitelná. Bez expirace token platí, dokud ho ručně nezrušíš.
-   - **TOTP kód** — pokud máš zapnuté 2FA, vyžadujeme aktuální kód i pro vytvoření
-     tokenu (step-up).
+   - **Čerstvé ověření** — použij passkey nebo TOTP. Passkey otevře systémový
+     dialog zařízení; TOTP vyžaduje aktuální šestimístný kód. Ověření je
+     jednorázové a vázané přímo na vytvoření tokenu.
 3. Po vytvoření zobrazíme **plain-text token** (`mi_pat_…`) — **jen jednou**.
    Ulož ho do password manageru, zpětně už ho nezobrazíme.
+
+Samotné přihlášení pomocí MFA nestačí: vytvoření PAT vždy vyžaduje nový
+účelový step-up, pokud má účet passkey nebo TOTP. Proof pro jinou operaci ani
+odemčení zamčené PWA token nevytvoří. PAT je bearer credential a serverový
+zámek browserové session se na něj nevztahuje; chraň jej vlastní expirací,
+minimálním scopem a včasnou revokací.
 
 ## 41.2 Použití tokenu
 

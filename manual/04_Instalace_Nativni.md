@@ -30,10 +30,17 @@ cp cfg.sample.php cfg.php
 Otevři `cfg.php` a vyplň:
 
 - `db.user` / `db.pass` — připojení k MariaDB
+- `app.url` — přesný stabilní veřejný origin aplikace
 - `app.pepper` — vygeneruj `openssl rand -base64 32`
 - `smtp.host` / `user` / `pass` — odchozí pošta
 - `captcha.site_key` / `secret_key` — z dash.cloudflare.com → Turnstile
 - `ip_allowlist.allow` — volitelné, doporučeno v produkci
+
+Pro passkeys musí `app.url` používat stabilní hostname a důvěryhodné HTTPS,
+například `https://faktury.example.cz`. Výjimkou pro lokální vývoj je
+`http://localhost`. Plain HTTP přes LAN IP ani střídání hostname aliasů není
+podporované. WebAuthn klíče jsou s hostname kryptograficky svázané, takže změna
+domény vyžaduje TOTP nebo administrátorskou recovery cestu.
 
 ## 4.2 Vytvoř databázi
 

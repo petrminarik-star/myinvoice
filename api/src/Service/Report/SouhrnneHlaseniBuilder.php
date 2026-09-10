@@ -177,7 +177,10 @@ final class SouhrnneHlaseniBuilder
         $deadlineMonth = $endMonth + 1;
         $deadlineYear = $year;
         if ($deadlineMonth > 12) { $deadlineMonth -= 12; $deadlineYear++; }
-        $deadline = sprintf('%04d-%02d-25', $deadlineYear, $deadlineMonth);
+        // § 33/4 daňového řádu: víkend/svátek → nejbližší následující pracovní den.
+        $deadline = CzechWorkingDays::shiftToWorkingDay(
+            new \DateTimeImmutable(sprintf('%04d-%02d-25', $deadlineYear, $deadlineMonth))
+        )->format('Y-m-d');
 
         return [
             'xml'     => $dom->saveXML() ?: '',

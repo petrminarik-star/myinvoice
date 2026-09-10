@@ -376,6 +376,10 @@ final class DphBookBuilder
      * default (kód 40 → "B.2"), takže by Kniha ukazovala B.2 i u drobných
      * dokladů, které v KH reálně jdou do sumace B.3 (POHODA tiskne efektivní
      * sekci — reference DPH_LIST_KH 42026.pdf: 2026-0010 → B.2, zbytek B.3).
+     * A.2 se naopak NEPŘEPOČÍTÁVÁ podle dodavatele: plnění od osoby neusazené
+     * v tuzemsku tam patří i bez EU DIČ, jen s prázdnou identifikací (issue #53,
+     * {@see KontrolniHlaseniBuilder::a2Identification()}). Kniha proto u dokladu
+     * ze 3. země tiskne A.2 — stejně jako výkaz.
      * Ostatní sekce (A.1, A.2, B.1, NULL) se nepřepočítávají.
      *
      * @param array<string,mixed> $g kanonický (seskupený) řádek ledgeru

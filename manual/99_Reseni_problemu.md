@@ -44,23 +44,57 @@ Po 10 neúspěšných pokusech / 15 min jsi zablokovaný na 15 min. Po 30 / hod
 na 24 h. Počkej, nebo požádej admina o reset z DB:
 `DELETE FROM login_attempts WHERE bucket_key LIKE '%tvuj_email%';`
 
-### 2FA — ztratil jsem telefon
+### Passkey nefunguje nebo se nezobrazuje systémový dialog
 
-MyInvoice nemá záložní kódy ani UI pro deaktivaci 2FA. Doporučený postup je
-CLI rescue:
+Zkontroluj:
+
+- aplikaci otevíráš přes přesný hostname z `cfg.php → app.url`,
+- v produkci používáš důvěryhodné HTTPS; pro lokální vývoj je povolené pouze
+  `http://localhost`,
+- prohlížeč a zařízení podporují WebAuthn a mají nastavený zámek obrazovky,
+- dialog spouštíš explicitním tlačítkem na viditelné stránce.
+
+Když se po kliknutí nic neděje a stránka vypadá zatuhle, čeká se na systémový
+dialog, který se nemusel zobrazit — otevřel se za oknem prohlížeče, na jiném
+monitoru, nebo si volání převzal správce hesel (Keeper, 1Password, Bitwarden)
+a jeho okno se nevykreslilo. Po několika sekundách se dole objeví panel
+**Čekám na potvrzení bezpečnostního dialogu** s tlačítkem *Zrušit čekání*;
+tím se akce ukončí hned a jde ji zopakovat nebo přepnout na TOTP. I bez zásahu
+se čekání samo ukončí po ~2 minutách chybovou hláškou. Když panel hlásí, že
+WebAuthn obsluhuje rozšíření, zkus ho pro tuto doménu vypnout.
+
+Passkey registrovaná na starém hostname nebude po změně domény fungovat.
+Přihlas se pomocí TOTP nebo jiné passkey dostupné pro původní origin a
+zaregistruj nový klíč. Pokud žádná recovery cesta nezůstala, použij CLI rescue
+níže.
+
+Přihlášený správce uvidí neplatnou WebAuthn konfiguraci také jako provozní
+upozornění na stránce **Administrace → Aktualizace**. Běžný login heslem a TOTP
+zůstává dostupný, dokud se `app.url` neopraví.
+
+### Odemčení PWA selže nebo je zařízení offline
+
+Odemčení vyžaduje spojení se serverem pro vydání a ověření jednorázové
+challenge. Zrušení dialogu, neplatná passkey nebo offline stav ponechá session
+zamčenou. Zkus připojení a akci opakuj. Případně zvol **Přihlásit se znovu**;
+aplikace nejprve bezpečně ukončí zamčenou session a pak provede celý login.
+
+Rozpracovaný formulář zůstane zachovaný jen dokud stránka zůstává v paměti.
+Pokud Android stránku ukončil, neuložená data nelze ze zámku obnovit.
+
+### Ztratil jsem passkey nebo TOTP zařízení
+
+Použij jinou passkey nebo TOTP. MyInvoice nemá záložní recovery kódy. Pokud
+není dostupný žádný silný faktor, správce spustí CLI rescue:
 
 ```bash
-php api/bin/reset-2fa.php tvuj@email.cz
+php api/bin/reset-mfa.php tvuj@email.cz
 ```
 
-Po resetu se přihlásíš jen s heslem a 2FA si znovu aktivuješ na novém telefonu.
-Detail viz [§ 39.2.3](39_Bezpecnost.md).
-
-Pokud nemáš shell přístup ke kontejneru/serveru, použij legacy SQL fallback:
-
-```sql
-UPDATE users SET totp_enabled = 0, totp_secret = NULL WHERE email = 'tvuj@email.cz';
-```
+Reset vypne TOTP, odvolá passkeys, smaže důvěryhodná zařízení a čekající
+ověřovací flow a invaliduje všechny session. Kompatibilní alias
+`reset-2fa.php` lze dál použít. Detail viz
+[§ 39.2.4](39_Bezpecnost.md#3924-obnova-pristupu).
 
 ### Varování `secret_encryption_key` (špatná délka klíče)
 
@@ -76,6 +110,26 @@ openssl rand -base64 32
 
 Vygenerovanou hodnotu ulož do `app.secret_encryption_key`. Klíč musí být
 base64, který po dekódování dává přesně 32 bajtů.
+
+### Varování `mfa_methods_configuration`
+
+V `auth.allowed_mfa_methods` (nebo `MYINVOICE_AUTH_MFA_METHODS`) je neznámá
+hodnota. Podporované jsou pouze `passkey` a `totp`; e-mailové OTP sem nepatří —
+zapíná se přes `auth.email_otp.enabled`. Aplikace kvůli tomu nespadne, jen
+dočasně jede na výchozím seznamu `['passkey', 'totp']`. Oprav seznam v `cfg.php`.
+
+### Varování `session_lock_without_unlock_method`
+
+`session.lock_after_minutes` je kladné, ale někteří aktivní uživatelé nemají
+passkey. Zamčenou session jde odemknout **jen passkey**, takže se z ní dostanou
+pouze odhlášením (a přijdou o rozepsaný formulář). Buď jim registruj passkey
+(**Profil → Přístupové klíče**), nebo nastav `session.lock_after_minutes = 0`
+a nech volbu intervalu na jednotlivých uživatelích.
+
+### Varování `session_lock_configuration`
+
+`session.lock_after_minutes` není celé číslo 0–1440. Výchozí automatický zámek
+je proto vypnutý; osobní intervaly uživatelů platí dál.
 
 ## 99.2 Faktury
 
@@ -201,8 +255,8 @@ Stats cache možná chybí. Spusť `php api/bin/recompute-stats.php` — přepo�
 
 ### Aplikace pomalu reaguje pod zátěží
 
-- Zapni Redis (`cfg.php → redis.enabled => true`) — sessions + brute-force
-  cache jdou do paměti místo DB
+- Zapni Redis (`cfg.php → redis.enabled => true`) — rate limiting, brute-force
+  ochrana a aplikační cache pak používají paměť místo DB
 - Zkontroluj `cfg.php → app.debug => false` v produkci (debug logs jsou
   drahé)
 - Sledování v `log/app-YYYY-MM-DD.log` (pomalé queries = `slow_query` v DB)

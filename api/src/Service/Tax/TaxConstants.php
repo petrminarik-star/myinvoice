@@ -12,8 +12,10 @@ namespace MyInvoice\Service\Tax;
  * když override pro daný rok není, spadne na tyhle hodnoty. Tahle třída je tedy
  * jediný zdroj výchozích čísel v kódu (a fallback pro testy/CLI bez DB).
  *
- * Hodnoty ověřeny k 2026-05 dle Finanční správy / ČSSZ / VZP:
- *  - paušální daň 2025 8 716/16 745/27 139 Kč/měs, 2026 9 984/16 745/27 139 Kč/měs
+ * Hodnoty ověřeny k 2026-07 dle Finanční správy / ČSSZ / VZP:
+ *  - paušální daň 2025 8 716/16 745/27 139 Kč/měs; 2026 9 984/16 745/27 139 Kč/měs
+ *    do června, od 1. 7. 2026 klesá 1. pásmo na 9 162 Kč/měs (2. a 3. beze změny —
+ *    na minimum OSVČ je navázaná jen důchodová složka 1. pásma)
  *  - průměrná mzda 2025 46 557 Kč, 2026 48 967 Kč → hranice 23 % = 36×
  *  - vyměřovací základ: sociální 55 % zisku, zdravotní 50 % zisku (§7)
  *  - min. roční vyměřovací základ: soc. hlavní 35 % (2025) / 40 % (2026) prům. mzdy,
@@ -25,16 +27,52 @@ final class TaxConstants
      * Konstanty pro daný rok; neznámý rok spadne na nejbližší předchozí známý
      * (budoucí roky tak dostanou poslední ověřené hodnoty, ne natvrdo zadrátovaný
      * rok), rok před začátkem tabulky na nejstarší známý.
+     *
+     * `pausal_annual` se dopočítá z rozvrhu měsíčních záloh pro POŽADOVANÝ rok
+     * ({@see PausalSchedule}) — u fallbacku tím vyjde „poslední platná sazba × 12".
      * @return array<string, mixed>
      */
     public static function forYear(int $year): array
     {
         if (isset(self::TABLE[$year])) {
-            return self::TABLE[$year];
+            return self::withDerived(self::TABLE[$year], $year);
         }
         $known = self::availableYears();
         $below = array_filter($known, static fn (int $y): bool => $y < $year);
-        return self::TABLE[$below !== [] ? max($below) : min($known)];
+        return self::withDerived(self::TABLE[$below !== [] ? max($below) : min($known)], $year);
+    }
+
+    /**
+     * Doplní odvozené klíče (dnes jen `pausal_annual` z `pausal_monthly`).
+     * Voláno i repository po sloučení s DB override, aby uložená roční částka
+     * nemohla přebít měsíční rozvrh.
+     *
+     * @param array<string, mixed> $constants
+     * @return array<string, mixed>
+     */
+    public static function withDerived(array $constants, int $year): array
+    {
+        $segments = PausalSchedule::normalize($constants['pausal_monthly'] ?? []);
+        if ($segments === []) {
+            // Legacy override bez rozvrhu: roční částku ber doslova, měsíční
+            // hodnoty jen dopočti pro zobrazení.
+            $constants['pausal_monthly'] = PausalSchedule::fromAnnual($year, $constants['pausal_annual'] ?? []);
+            return $constants;
+        }
+        // Rozvrh se ukotví k požadovanému roku: segmenty z jiného roku (fallback na
+        // poslední známý rok) se srazí na jedinou sazbu platnou k 1. 1. — pro budoucí
+        // rok platí poslední známá záloha celý rok, ne zopakovaný schod uprostřed roku.
+        $anchored = [['from' => sprintf('%04d-01-01', $year)] + PausalSchedule::monthlyAt($year, 1, $segments)];
+        foreach ($segments as $seg) {
+            if (substr((string) $seg['from'], 0, 4) === (string) $year) {
+                $anchored[] = $seg;
+            }
+        }
+        $segments = PausalSchedule::normalize($anchored);
+
+        $constants['pausal_monthly'] = $segments;
+        $constants['pausal_annual']  = PausalSchedule::annual($year, $segments);
+        return $constants;
     }
 
     public static function availableYears(): array
@@ -45,8 +83,11 @@ final class TaxConstants
     private const TABLE = [
         2025 => [
             'year' => 2025,
-            // Paušální daň — roční částka dle pásma (12× měsíční záloha)
-            'pausal_annual' => ['band1' => 104592, 'band2' => 200940, 'band3' => 325668],
+            // Paušální daň — měsíční záloha dle pásma; segment platí od `from`,
+            // dokud ho nevystřídá další. Roční částka (`pausal_annual`) je odvozená.
+            'pausal_monthly' => [
+                ['from' => '2025-01-01', 'band1' => 8716, 'band2' => 16745, 'band3' => 27139],
+            ],
             // Stropy pásem dle příjmu × výdajového paušálu (§7a ZDP).
             // Klíč = sazba výdajového paušálu; hodnota = strop pro [band1, band2, band3].
             // Pozn.: SummaryAction::FLAT_TAX_BANDS drží zjednodušenou (činnost-neutrální)
@@ -90,7 +131,13 @@ final class TaxConstants
         ],
         2026 => [
             'year' => 2026,
-            'pausal_annual' => ['band1' => 119808, 'band2' => 200940, 'band3' => 325668],
+            // Od 1. 7. 2026 klesá záloha 1. pásma z 9 984 na 9 162 Kč (novela zákona
+            // o minimálním pojistném OSVČ). Roční částka 1. pásma tak vychází
+            // 6× 9 984 + 6× 9 162 = 114 876 Kč, ne 12× 9 984.
+            'pausal_monthly' => [
+                ['from' => '2026-01-01', 'band1' => 9984, 'band2' => 16745, 'band3' => 27139],
+                ['from' => '2026-07-01', 'band1' => 9162, 'band2' => 16745, 'band3' => 27139],
+            ],
             'band_ceilings' => [
                 30 => ['band1' => 1000000, 'band2' => 1500000, 'band3' => 2000000],
                 40 => ['band1' => 1000000, 'band2' => 1500000, 'band3' => 2000000],

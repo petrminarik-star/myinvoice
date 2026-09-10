@@ -25,6 +25,16 @@ GET  /api/auth/me                        POST /api/auth/change-password
 POST /api/auth/forgot                    POST /api/auth/reset
 GET  /api/auth/totp/status               POST /api/auth/totp/setup
 POST /api/auth/totp/enable
+GET  /api/auth/webauthn/credentials
+POST /api/auth/webauthn/register/options POST /api/auth/webauthn/register/verify
+POST /api/auth/webauthn/login/options
+POST /api/auth/webauthn/login/verify
+POST /api/auth/webauthn/step-up/options  POST /api/auth/webauthn/step-up/verify
+PATCH/DELETE /api/auth/webauthn/credentials/{id}
+POST /api/auth/mfa/step-up/totp
+GET  /api/auth/session/status            POST /api/auth/session/activity
+POST /api/auth/session/lock
+POST /api/auth/session/unlock/options    POST /api/auth/session/unlock/verify
 
 # ARES / VIES (auth required)
 POST /api/clients/lookup-ares            POST /api/clients/lookup-vies
@@ -120,7 +130,9 @@ POST /api/bank-transactions/{id}/ignore
 - **Reminders:** `/api/invoices/{id}/reminder`, `reminder-test` a `bulk-reminder` (po splatnosti).
 - **PDF historie:** `/api/invoices/{id}/pdfs` listuje archivované PDF, `/{archiveId}` stahuje konkrétní snapshot.
 - **Generic export/import (M6/M7):** `/api/admin/export?format=pdf-zip|isdoc|pohoda|stereo&month=YYYY-MM` nebo `period=quarterly&year=YYYY&quarter=1..4`, `/api/admin/import` (Pohoda XML / ISDOC, single i ZIP).
-- **TOTP/2FA:** `/api/auth/totp/*` pro nastavení a aktivaci.
+- **MFA:** `/api/auth/totp/*` pro TOTP, `/api/auth/webauthn/*` pro passkeys,
+  `/api/auth/mfa/step-up/*` pro účelový proof a `/api/auth/session/*` pro
+  autoritativní app-lock.
 - **IP allowlist a další security policies** se konfigurují v `cfg.php` (resp. v DB přes setup), **nikoli** přes API. Endpointy `/admin/security/*`, `/admin/smtp/test`, `/admin/sessions` neexistují.
 
 ---
@@ -200,6 +212,7 @@ Vždy dostupný. Vrací stav prvotního nastavení + public captcha info.
 {
   "needs_setup": true,
   "version": "1.9.0",
+  "passwordless_login_enabled": false,
   "captcha": { "provider": "turnstile", "site_key": "0x4...", "script_url": "https://..." }
 }
 ```
@@ -221,16 +234,42 @@ Vygeneruje sample data (klienti, projekty, ukázkové faktury) pro účely demo.
 ### `POST /auth/login`
 
 ```json
-{ "email": "...", "password": "...", "cf_turnstile_response": "...", "totp_code": "123456" }
+{ "email": "...", "password": "...", "cf_turnstile_response": "...", "totp": "123456" }
 ```
 
 - `cf_turnstile_response` povinný **jen** pokud předchozí response byla `423 captcha_required` (5+ selhání v okně 5 min).
-- `totp_code` povinný pokud má uživatel zapnuté TOTP (jinak ignored).
+- Má-li účet passkey, server vrátí `401 mfa_required` s opaque `flow_token`,
+  `methods` a WebAuthn request options. Passkey ověří
+  `/auth/webauthn/login/verify`.
+- TOTP zůstává explicitní fallback. Účet s passkey nedostane automatický
+  downgrade na e-mailové OTP.
 
-Response 200: `{ "user": { "id":1, "email":"...", "name":"...", "role":"admin", "locale":"cs" }, "csrf_token": "..." }`
-Cookie: `myinvoice_session=<token>; HttpOnly; Secure; SameSite=Lax; Max-Age=2592000`
+Response 200 obsahuje user, `csrf_token`, obecnou MFA politiku a autoritativní
+session stav/deadline. Cookie je HttpOnly, Secure, SameSite, Path=/ a má
+zbývající absolutní Max-Age.
 
 Errors: `401 invalid_credentials`, `401 totp_required`, `401 totp_invalid`, `423 captcha_required`, `423 captcha_failed`, `429 too_many_attempts`.
+
+### `POST /auth/webauthn/login/options`
+
+Ve výchozím stavu vypnutý veřejný začátek passwordless loginu. Vyžaduje
+`auth.passwordless_login.enabled = true`, povolenou metodu `passkey` a platnou
+WebAuthn konfiguraci.
+
+```json
+{ "cf_turnstile_response": "..." }
+```
+
+Vrací `{ "flow_token": "...", "public_key": { ... } }`. Request options mají
+prázdné `allowCredentials`, takže účet vybere authenticator z discoverable
+passkeys pro aktuální RP ID. Flow předem neobsahuje user ID, expiruje nejpozději
+za pět minut a je jednorázové.
+
+Klient odešle assertion na `POST /auth/webauthn/login/verify` ve stejném formátu
+jako po heslovém loginu. Server podle globálně unikátního credential ID načte
+kandidáta a před vydáním session ověří podpis, RP/origin, povinné user
+verification, credential ID i neprázdný shodný `userHandle`. Neznámá credential
+a chybné ověření vracejí stejnou obecnou chybu.
 
 ### `POST /auth/logout` → 204
 
@@ -253,6 +292,32 @@ Errors: `401 invalid_credentials`, `401 totp_required`, `401 totp_invalid`, `423
 - `GET /auth/totp/status` — `{ "enabled": true|false, "enrolled_at": "..." }`
 - `POST /auth/totp/setup` — vygeneruje secret + QR kód. Response: `{ "secret": "BASE32...", "qr_data_url": "data:image/png;base64,...", "uri": "otpauth://..." }`. Není ještě aktivováno.
 - `POST /auth/totp/enable` — `{ "code": "123456" }` ověří první kód a TOTP zapne. Errors: `400 invalid_code`.
+
+### Passkeys, step-up a zámek session
+
+- Management passkeys je session-only; registrace a odvolání vyžadují čerstvý
+  účelový proof, první faktor účtu bez silného MFA aktuální heslo.
+- Při přechodu politiky z TOTP na passkeys smí jinak už nepovolené TOTP vydat
+  proof pouze pro `passkey.register`, jen pokud politika povoluje passkey a
+  uživatel dosud nemá žádnou aktivní passkey. Výjimka neplatí pro druhý klíč
+  ani pro jinou operaci. Registration ceremony si toto omezení nese jako
+  interní constraint a uložení credential jej znovu atomicky ověří po zamčení
+  uživatele; více předem vydaných first-passkey flow proto uloží nejvýše jeden
+  klíč.
+- Options/verify flow je pětiminutový, jednorázový a server ukládá jen hash
+  opaque tokenu. Každá ceremony je vázaná na účel a podle typu také session a
+  operation.
+- Discoverable passwordless login používá samostatný účel bez předem známého
+  uživatele; identitu smí určit až podepsaná credential se shodným user handle.
+- `POST /auth/mfa/step-up/totp` nebo WebAuthn step-up vydá jednorázový proof
+  pro konkrétní operaci, například `api_token.create`.
+- `GET /auth/session/status` vrací minimální stav. `activity` posouvá deadline
+  pouze po frontendovém signálu skutečného vstupu. `lock` přepne session do
+  serverového locked stavu.
+- Unlock options/verify je povolený jen zamčené session. Úspěšná assertion
+  zachová původní absolutní expiraci, ale rotuje session ID i CSRF.
+- Interní auth endpointy se nezveřejňují pod `/api/v1`; veřejné integrační API
+  zůstává PAT-only.
 
 ---
 
@@ -820,6 +885,9 @@ Označí transakci jako ignorovanou (nezahrne do reportů, neptá se na párová
 | Endpoint | Limit |
 |---|---|
 | `POST /auth/login` | 10/min/IP, navíc brute-force guard per email+IP/24 |
+| `POST /auth/webauthn/login/options` | 10/min/IP |
+| `POST /auth/webauthn/login/verify` | 10/min/IP + 10 neúspěšných assertion / 10 min / user |
+| Ostatní WebAuthn/session endpointy | 20/min/user; activity heartbeat 120/min/user |
 | `POST /auth/forgot` | 3/hod/email, 10/hod/IP |
 | `POST /auth/reset` | 5/hod/IP |
 | `POST /clients/lookup-ares` | 30/min/user (chrání ARES) |
@@ -842,6 +910,7 @@ Header: `Retry-After: 45`.
 - `GET /auth/setup-status`
 - `POST /auth/setup`, `/auth/setup-ares-lookup`, `/auth/setup-sample`
 - `POST /auth/login`, `/auth/forgot`, `/auth/reset`
+- `POST /auth/webauthn/login/options`, `/auth/webauthn/login/verify`
 - `GET /codebooks/*` (pomáhá login screen lokalizovat)
 - `GET /api/public/approval/{token}` + `POST /api/public/approval/{token}/decide`
 

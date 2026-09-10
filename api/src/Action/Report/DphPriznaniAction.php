@@ -34,7 +34,22 @@ final class DphPriznaniAction
         private readonly IpMatcher $ipMatcher,
         private readonly \MyInvoice\Service\Report\TaxSubmissionArchiver $archiver,
         private readonly \MyInvoice\Service\Currency\MissingExchangeRateFiller $rateFiller,
+        private readonly \MyInvoice\Service\Report\EpoIdentityValidator $epoValidator,
+        // Sazby pro dopočet EPO propustné chyby 49 (ř. 40/41) — per rok období.
+        private readonly \MyInvoice\Repository\TaxConstantsRepository $taxConstants,
     ) {}
+
+    /**
+     * EPO identifikace: chybějící XSD-povinná pole → 422 při STAŽENÍ XML, viz
+     * EpoIdentityValidator. Bez nich vznikne validně vypadající XML, které EPO
+     * portál odmítne. Náhled se neblokuje (pole vrací v `missing[]`).
+     */
+    private function epoIdentityError(Response $response, array $missing): Response
+    {
+        return Json::error($response, 'epo_identity_incomplete',
+            'Nelze vygenerovat XML — chybí povinné údaje pro EPO podání. Doplň je v Nastavení → Daňové nastavení.',
+            422, ['missing' => $missing, 'settings_url' => '/admin/settings#epo']);
+    }
 
     /**
      * GET /api/reports/dphdp3/settings → { vat_period, is_vat_payer }
@@ -149,6 +164,10 @@ final class DphPriznaniAction
 
         $period = (string) ($q['period'] ?? '');
         $period = in_array($period, ['monthly', 'quarterly'], true) ? $period : null;
+        // Náhled se NEBLOKUJE ani při chybějící identifikaci — čísla výkazu si
+        // uživatel musí umět zobrazit. Chybějící povinná pole jdou do
+        // `missing[]`, na jejich základě UI zakáže stažení XML.
+        $epo = $this->epoValidator->forSupplier($supplierId, \MyInvoice\Service\Report\EpoIdentityValidator::DOC_DPHDP3);
         try {
             $result = $this->builder->build($supplierId, $year, $month, $period);
         } catch (\Throwable $e) {
@@ -157,8 +176,56 @@ final class DphPriznaniAction
 
         return Json::ok($response, [
             'summary'  => $result['summary'],
-            'warnings' => $result['warnings'],
+            'missing'  => $epo['missing'],
+            // Doporučená pole (ÚzP, e-mail, opr_*, telefon, CZ-NACE…) jen varují.
+            'warnings' => array_merge(
+                $result['warnings'],
+                $epo['warnings'],
+                $this->roundingWarnings($result['summary'], $year),
+            ),
         ]);
+    }
+
+    /**
+     * Propustná chyba EPO 49 na ř. 40/41 (BUG 7): EPO si daň dopočítává jako
+     * round(zaokrouhlený základ × sazba), zatímco přiznání nese SOUČET daně
+     * z jednotlivých dokladů (haléřové rozdíly zaokrouhlení per doklad). Rozdíl
+     * je legitimní a hodnota z dokladů odpovídá sekci B.2/B.3 kontrolního
+     * hlášení — uživatele jen předem upozorníme, ať hodnotu „neopravuje".
+     * XML se kvůli tomu NIKDY nepřepisuje (musí souhlasit s KH).
+     *
+     * @param array<string,mixed> $summary summary z DphPriznaniBuilder (lines)
+     * @return list<string>
+     */
+    private function roundingWarnings(array $summary, int $year): array
+    {
+        $lines = (array) ($summary['lines'] ?? []);
+        $constants = $this->taxConstants->forYear($year);
+        $rates = [
+            '40' => (float) ($constants['vat_rate_standard'] ?? 21.0),
+            '41' => (float) ($constants['vat_rate_reduced'] ?? 12.0),
+        ];
+        $out = [];
+        foreach ($rates as $line => $rate) {
+            if (!isset($lines[$line])) {
+                continue;
+            }
+            $data = (array) $lines[$line];
+            // Stejné zaokrouhlení jako XML: základ i daň na celé Kč.
+            $baseRounded = (int) round((float) ($data['base'] ?? 0));
+            $vatFromDocs = (int) round((float) ($data['vat'] ?? 0));
+            $vatComputed = (int) round($baseRounded * $rate / 100);
+            $diff = $vatFromDocs - $vatComputed;
+            if ($diff !== 0) {
+                $out[] = sprintf(
+                    'EPO nahlásí propustnou chybu 49 na ř. %s: rozdíl %d Kč vzniká zaokrouhlením základu. '
+                    . 'Hodnota z dokladů je správná a odpovídá sekci B.2/B.3 kontrolního hlášení — neupravuj ji.',
+                    $line,
+                    abs($diff),
+                );
+            }
+        }
+        return $out;
     }
 
     public function download(Request $request, Response $response): Response
@@ -177,12 +244,27 @@ final class DphPriznaniAction
 
         $period = (string) ($q['period'] ?? '');
         $period = in_array($period, ['monthly', 'quarterly'], true) ? $period : null;
+        $epo = $this->epoValidator->forSupplier($supplierId, \MyInvoice\Service\Report\EpoIdentityValidator::DOC_DPHDP3);
+        if ($epo['missing'] !== []) {
+            return $this->epoIdentityError($response, $epo['missing']);
+        }
+        // Forma podání (B/O; dodatečné D/E dočasně nepodporováno — § 141/2 DŘ
+        // vyžaduje vykázání rozdílů, viz DphPriznaniBuilder::FORMS) + volitelné
+        // datum zjištění důvodů u O.
+        $fp = \MyInvoice\Service\Report\ReportFormParams::fromQuery(
+            $q,
+            \MyInvoice\Service\Report\DphPriznaniBuilder::FORMS,
+            \MyInvoice\Service\Report\DphPriznaniBuilder::FORMS_REQUIRING_DZJIST,
+        );
+        if ($fp['error'] !== null) {
+            return Json::error($response, 'validation_failed', $fp['error'], 400);
+        }
         try {
-            $result = $this->builder->build($supplierId, $year, $month, $period);
+            $result = $this->builder->build($supplierId, $year, $month, $period, $fp['form'], $fp['d_zjist']);
             // #238: doplň chybějící kurzy z ČNB a přebuildi; tvrdá chyba jen když ČNB nemá.
             if (!empty($result['missing_rates'])) {
                 $this->rateFiller->fill($supplierId, $result['missing_rates']);
-                $result = $this->builder->build($supplierId, $year, $month, $period);
+                $result = $this->builder->build($supplierId, $year, $month, $period, $fp['form'], $fp['d_zjist']);
                 if (!empty($result['missing_rates'])) {
                     $labels = \MyInvoice\Service\Report\VatLedgerService::missingExchangeRateLabels($result['missing_rates']);
                     return Json::error($response, 'exchange_rate_missing',

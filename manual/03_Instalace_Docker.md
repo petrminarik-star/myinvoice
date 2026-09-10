@@ -208,6 +208,11 @@ V prohlížeči naskočí setup wizard — viz [6. První spuštění](06_Setup_
 > `127.*`, `localhost` a `*.local` jsou vyjmuty z HTTPS redirectu v `.htaccess`
 > a `web.config`. Také požadavek s hlavičkou `X-Forwarded-Proto: https`
 > (reverse proxy s TLS terminací) redirect přeskočí.
+>
+> ⚠️ Přístup přes LAN IP a plain HTTP je vhodný pro prvotní instalaci, ale
+> **passkeys na něm nejsou podporované**. Pro passkeys použij stabilní hostname,
+> důvěryhodné HTTPS a nastav `app.url` na přesný veřejný origin. Výjimkou pro
+> lokální vývoj je `http://localhost`.
 
 ## 3.5 Změna portu
 
@@ -230,8 +235,10 @@ MYINVOICE_MIGRATE_ATTEMPTS=20   # počet retry pokusů migrace
 MYINVOICE_MIGRATE_DELAY=3       # pauza mezi pokusy (sekundy)
 MYINVOICE_DATA_DIR=/data        # default v compose souborech; sjednocuje
                                 # log/, storage/, private/ a cfg.local.php pod /data
-MYINVOICE_AUTH_REQUIRE_TOTP=true # vynutit 2FA pro všechny uživatele
-                                # (default false; viz § 37.2.4)
+MYINVOICE_AUTH_REQUIRE_MFA=true  # vyžadovat passkey nebo TOTP
+MYINVOICE_AUTH_MFA_METHODS=passkey,totp
+MYINVOICE_AUTH_PASSWORDLESS_LOGIN=true # povolit passkey login bez e-mailu a hesla; default false
+MYINVOICE_SESSION_LOCK_AFTER_MINUTES=15 # výchozí interval a maximum osobní volby; 0 nic nevynucuje
 ```
 
 Default je `20` pokusů s pauzou `3` sekundy. Pokud proměnné nenastavíš, použije
@@ -413,6 +420,12 @@ hlavičky vynucuje HTTP→HTTPS redirect a vzniká redirect loop.
 musí přesně odpovídat veřejné URL, jinak budou linky vést na špatnou doménu
 nebo `localhost:8080`. `__Host-` cookie prefix vyžaduje HTTPS — pokud jsi po
 této změně zkusil load přes `http://`, login se rozbije (cookie se neuloží).
+
+Stejná hodnota je bezpečnostní autoritou pro WebAuthn: určuje přesný origin a
+hostname (RP ID), pro který lze passkey vytvořit a použít. Neodvozuje se
+z `Host` ani proxy hlaviček. Změna `app.url` na jiný hostname proto zneplatní
+použitelnost dříve registrovaných passkeys; před změnou ověř TOTP nebo jinou
+recovery cestu.
 
 Restart stacku: `docker compose -f docker-compose.production.yml restart app`
 (nebo bez `-f` flagu pro Variantu B).

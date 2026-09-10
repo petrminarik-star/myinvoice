@@ -36,7 +36,8 @@ Multi-supplier fakturační systém (jedna instalace = N dodavatelů / IČO s iz
 14. **Exporty pro účetní:** PDF ZIP po měsících, **ISDOC 6.0.2**, **Pohoda XML** (per-dodavatel kódy: středisko, činnost, předkontace), **Stereo XML**
 15. Reverse charge přepínatelný per klient
 16. Číselník DPH s validitou v čase, měny **CZK + EUR** (rozšiřitelný), per-dodavatel bankovní účty
-17. **Brute-force ochrana** přes Redis (fallback MariaDB MEMORY) + **TOTP 2FA**
+17. **Brute-force ochrana** přes Redis (fallback MariaDB MEMORY) + **MFA**
+    pomocí passkeys/WebAuthn nebo TOTP + serverový zámek PWA session
 18. **IP allowlist** s podporou IPv4/IPv6 + CIDR (`/24`, `/56`, `/64` …)
 19. Activity log všech mutací finančních dat (per-supplier scoped)
 20. **CZ + EN** lokalizace UI, faktur i e-mailových šablon

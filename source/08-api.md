@@ -1,6 +1,6 @@
 # Public REST API v1 — Implementační plán
 
-Cílový stav: bearer tokeny (`mi_pat_…`) v hlavičce `Authorization`, scope `read` / `read_write`, bound na `supplier_id`, step-up TOTP při tvorbě, OpenAPI 3.1 spec ručně udržovaný v repu, Redoc UI na `/api/docs`, routes alias `/api/v1/*` paralelně s `/api/*`.
+Cílový stav: bearer tokeny (`mi_pat_…`) v hlavičce `Authorization`, scope `read` / `read_write`, bound na `supplier_id`, účelový passkey/TOTP step-up při tvorbě, OpenAPI 3.1 spec ručně udržovaný v repu, Redoc UI na `/api/docs`, routes alias `/api/v1/*` paralelně s `/api/*`.
 
 Issue: https://github.com/radekhulan/myinvoice/issues/19
 
@@ -12,7 +12,7 @@ Issue: https://github.com/radekhulan/myinvoice/issues/19
 | Scopes | `read` / `read_write` (jedno pole `scope`). |
 | Supplier scope | Token je při tvorbě bound na konkrétní `supplier_id` (NULL = všichni supplier-i usera). |
 | Verzování | Alias `/api/v1/*` paralelně s `/api/*` (rewrite MW). SPA se nemění. |
-| Step-up | Tvorba tokenu vyžaduje re-ověření TOTP, pokud má user TOTP zapnuté. |
+| Step-up | Tvorba tokenu vyžaduje jednorázový proof pro `api_token.create`, pokud má user passkey nebo TOTP; raw TOTP zůstává kompatibilní cesta. |
 | Dokumentace | Ručně psaný `api/openapi.yaml`, Redoc HTML page. |
 | Webhooks | Out of scope. |
 | OAuth2 | Out of scope. |
@@ -72,7 +72,11 @@ Pokud bearer, klíč = `token:{id}` místo `user:{id}` / `ip:{ip}`. Default 600 
 
 V `api/src/Action/Auth/Tokens/`:
 - `GET /api/auth/tokens` → `ListTokensAction` — bez plaintextu.
-- `POST /api/auth/tokens` → `CreateTokenAction` — body `{name, supplier_id?, scope, expires_at?, totp_code}`. Vyžaduje **aktivní session** + ověření TOTP (pokud user má `totp_enabled`). Vrátí plaintext jen v této response. Log do `activity_log`.
+- `POST /api/auth/tokens` → `CreateTokenAction` — body
+  `{name, supplier_id?, scope, expires_at?, step_up_token?, totp_code?}`.
+  Vyžaduje **aktivní session** a nový účelový passkey/TOTP proof, pokud má
+  uživatel silný faktor. Vrátí plaintext jen v této response. Log do
+  `activity_log`.
 - `DELETE /api/auth/tokens/{id}` → `RevokeTokenAction` — set `revoked_at`, log.
 
 **`/api/auth/api-me`** (`GET`) — vrátí `{user, supplier, scope, token_prefix, expires_at}`. Connection-test pro Make/Zapier. Funguje s bearer i session.
@@ -114,7 +118,11 @@ Postupně doplnit zbytek endpointů (Projects, WorkReports, BankStatements, Sett
 
 **`app/src/views/settings/ApiTokensView.vue`**:
 - List: prefix, name, supplier, scope, last_used_at, expires_at, status badge.
-- "Create" modal: name input, supplier select, scope radio, expiry datepicker (optional), TOTP input (jen pokud user má TOTP). Po submitu zobrazit plaintext s "Copy" + warning "už nikdy neuvidíte". Modal nezavírá bez explicitního potvrzení.
+- "Create" modal: name input, supplier select, scope radio, expiry datepicker
+  (optional), passkey tlačítko a TOTP fallback podle dostupných metod. Proof
+  zůstává pouze v paměti a po pokusu o vytvoření se zahodí. Po submitu zobrazit
+  plaintext s "Copy" + warning "už nikdy neuvidíte". Modal nezavírá bez
+  explicitního potvrzení.
 - "Revoke" button → confirm modal.
 
 Update `app/src/router/index.ts` — `/settings/api-tokens`. Nav link v Settings.

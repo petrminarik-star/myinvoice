@@ -30,6 +30,8 @@ final class CsrfMiddleware implements MiddlewareInterface
         '/api/auth/setup-crpdph-lookup',
         // setup-sample je auth + má CSRF token (po auto-loginu)
         '/api/auth/login',
+        '/api/auth/webauthn/login/options',
+        '/api/auth/webauthn/login/verify',
         '/api/auth/forgot',
         '/api/auth/reset',
     ];

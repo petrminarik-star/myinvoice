@@ -24,13 +24,36 @@ final class DphPriznaniBuilder
     ) {}
 
     /**
+     * Povolené formy podání: B řádné, O opravné (§ 138 DŘ).
+     *
+     * Dodatečné formy D/E (§ 141 DŘ) jsou ZÁMĚRNĚ vypnuté: dodatečné přiznání
+     * se dle § 141 odst. 2 DŘ podává v ROZDÍLECH proti poslední známé dani,
+     * builder ale umí jen plné hodnoty za období — vygenerované XML by bylo
+     * věcně špatně (znovu přiznaná celá daň, v neprospěch poplatníka).
+     * Re-enable = vrátit 'D'/'E' sem a do FORMS_REQUIRING_DZJIST, až bude
+     * implementován dopočet rozdílů proti poslední známé dani.
+     * (Následné KH je jiný případ — podává se kompletní, KH formy se nemění.)
+     */
+    public const FORMS = ['B', 'O'];
+    /** Formy, u kterých EPO vyžaduje datum zjištění důvodů (d_zjist) — dodatečná podání (§ 141 DŘ). */
+    public const FORMS_REQUIRING_DZJIST = [];
+
+    /**
      * Sestaví XML pro DPH přiznání za daný měsíc/kvartál.
      *
      * @param string $period 'monthly' (default) nebo 'quarterly' (sumuje celý kvartál)
+     * @param string $form dapdph_forma — viz FORMS; u O je $dZjist volitelné
+     * @param string|null $dZjist datum zjištění důvodů pro podání (DD.MM.YYYY)
      * @return array{xml: string, summary: array<string, mixed>, warnings: list<string>}
      */
-    public function build(int $supplierId, int $year, int $month, ?string $period = null): array
+    public function build(int $supplierId, int $year, int $month, ?string $period = null, string $form = 'B', ?string $dZjist = null): array
     {
+        if (!in_array($form, self::FORMS, true)) {
+            throw new \InvalidArgumentException("Neplatná forma přiznání '{$form}' (povolené: " . implode(', ', self::FORMS) . ').');
+        }
+        if (in_array($form, self::FORMS_REQUIRING_DZJIST, true) && ($dZjist === null || $dZjist === '')) {
+            throw new \InvalidArgumentException('Dodatečné přiznání vyžaduje datum zjištění důvodů (d_zjist).');
+        }
         $supplier = $this->loadSupplier($supplierId);
         // Default period z supplier.vat_period, fallback 'monthly'
         if ($period === null) {
@@ -110,19 +133,27 @@ final class DphPriznaniBuilder
         } else {
             $vetaD->setAttribute('mesic', (string) $month);
         }
-        $vetaD->setAttribute('dapdph_forma', 'B'); // B = řádné (default), O/D/E = opravné/dodatečné
+        // B = řádné (default), O = opravné. Dodatečné D/E jsou vypnuté do
+        // implementace dopočtu rozdílů dle § 141/2 DŘ — viz komentář u FORMS.
+        $vetaD->setAttribute('dapdph_forma', $form);
+        // Datum zjištění důvodů (§ 141 DŘ) — u O volitelně propustíme, když ho
+        // uživatel vyplní.
+        if ($dZjist !== null && $dZjist !== '') {
+            $vetaD->setAttribute('d_zjist', $dZjist);
+        }
         $vetaD->setAttribute('dokument', 'DP3');   // identifikace typu výkazu
         // P = plátce DPH (default), I = identifikovaná osoba (S = skupina, N = neplátce)
         $vetaD->setAttribute('typ_platce', $isIdentified ? 'I' : 'P');
-        // CZ-NACE klasifikace (hlavní ekonomická činnost, 6-digit) — vyplňuje se
-        // z `supplier.cz_nace_code`. Hodnotu očekávanou EPO ověřuje uživatel
-        // proti číselníku https://mojedane.gov.cz/pmd/dokumentace/ciselniky/ukazka/okec.
+        // CZ-NACE klasifikace (hlavní ekonomická činnost) — vyplňuje se
+        // z `supplier.cz_nace_code`, kanonizuje se proti snapshotu číselníku
+        // ČINNOSTI (viz EpoOkecCodebook); expirace/neznámý kód se hlásí
+        // ve warnings completeness checku, build neblokuje.
         $okec = EpoSupplierBlockBuilder::normalizeOkec((string) ($supplier['cz_nace_code'] ?? ''));
         if ($okec !== null) {
             $vetaD->setAttribute('c_okec', $okec);
         }
         $vetaD->setAttribute('d_poddp', date('d.m.Y')); // datum podání (dnes)
-        // trans: A = vznikla daňová povinnost (vlastní daň > 0), N = nevznikla.
+        // trans: „existují údaje pro oddíl C?" — spočteme níže, až budou Vety sestavené.
         // Spočteme níže po sestavení Veta6 a setneme přes setAttribute.
         $dphdp3->appendChild($vetaD);
 
@@ -308,9 +339,24 @@ final class DphPriznaniBuilder
         $vetaR->setAttribute('poradi', '1');
         $dphdp3->appendChild($vetaR);
 
-        // trans: A = vznikla daňová povinnost (kladná vlastní daň), N = nevznikla
-        // (nadměrný odpočet / nulový rozdíl). Setneme až teď, kdy máme spočítáno.
-        $vetaD->setAttribute('trans', $vlastniDan > 0 ? 'A' : 'N');
+        // ⚠️ `trans` NENÍ znaménko daně, ale zaškrtávátko „Neexistují-li údaje
+        // pro C. oddíl". EPO podle něj oddíl C buď vykreslí, nebo PŘEŠKRTNE —
+        // a přeškrtnutý oddíl obsahovou kontrolou neprojde:
+        //
+        //   CHYBA 36 — JE ZAŠKRTNUTO, ŽE NEEXISTUJÍ ÚDAJE PRO C. ODDÍL,
+        //   NESMÍ BÝT VYPLNĚNY ÚDAJE V ODDÍLE C.
+        //
+        // Dokud se odvozovalo jen ze znaménka vlastní daně, dostalo přiznání
+        // složené výhradně ze samovyměření (daň na výstupu i zrcadlový odpočet
+        // ve stejné výši, ř. 64 = 0) hodnotu `N` — a bylo bez ručního zásahu
+        // nepodatelné, přestože Veta1 i Veta4 byly vyplněné správně. Totéž
+        // hrozilo u nadměrného odpočtu.
+        //
+        // Proto: máme-li v oddílu C cokoliv vyplněné, `trans` je `A`. `N`
+        // zůstává pro období, ve kterém se opravdu nic nestalo.
+        $sectionCHasData = !empty($veta1Attrs) || !empty($veta2Attrs) || !empty($veta3Attrs)
+            || !empty($veta4Attrs) || !empty($veta5Attrs);
+        $vetaD->setAttribute('trans', ($vlastniDan > 0 || $sectionCHasData) ? 'A' : 'N');
 
         // Termín podání: 25. den následujícího měsíce po skončení období
         $deadlineMonth = $quarter !== null ? ($quarter * 3 + 1) : ($month + 1);
@@ -319,11 +365,15 @@ final class DphPriznaniBuilder
             $deadlineMonth -= 12;
             $deadlineYear += 1;
         }
-        $deadline = sprintf('%04d-%02d-25', $deadlineYear, $deadlineMonth);
+        // § 33/4 daňového řádu: víkend/svátek → nejbližší následující pracovní den.
+        $deadline = CzechWorkingDays::shiftToWorkingDay(
+            new \DateTimeImmutable(sprintf('%04d-%02d-25', $deadlineYear, $deadlineMonth))
+        )->format('Y-m-d');
 
         $summary = [
             'period'                  => sprintf('%04d-%02d', $year, $month),
             'period_type'             => $period,
+            'form'                    => $form,
             'typ_platce'              => $isIdentified ? 'I' : 'P',
             'quarter'                 => $quarter,
             'lines'                   => $lines,

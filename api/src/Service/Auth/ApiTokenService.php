@@ -6,6 +6,7 @@ namespace MyInvoice\Service\Auth;
 
 use MyInvoice\Infrastructure\Cache\RedisFactory;
 use MyInvoice\Infrastructure\Database\Connection;
+use PDO;
 
 /**
  * Personal Access Tokens pro veřejné REST API.
@@ -43,6 +44,41 @@ final class ApiTokenService
         string $scope,
         ?\DateTimeImmutable $expiresAt = null,
     ): array {
+        $pdo = $this->db->pdo();
+        $pdo->beginTransaction();
+        try {
+            $token = $this->generateInTransaction(
+                $pdo,
+                $userId,
+                $supplierId,
+                $name,
+                $scope,
+                $expiresAt,
+            );
+            $pdo->commit();
+            return $token;
+        } catch (\Throwable $e) {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            throw $e;
+        }
+    }
+
+    /**
+     * @return array{plaintext: string, prefix: string, id: int}
+     */
+    public function generateInTransaction(
+        PDO $pdo,
+        int $userId,
+        ?int $supplierId,
+        string $name,
+        string $scope,
+        ?\DateTimeImmutable $expiresAt = null,
+    ): array {
+        if (!$pdo->inTransaction() || $userId < 1) {
+            throw new \LogicException('Vytvoření API tokenu vyžaduje aktivní transakci a uživatele.');
+        }
         if (!in_array($scope, ['read', 'read_write'], true)) {
             throw new \InvalidArgumentException('Invalid scope: ' . $scope);
         }
@@ -57,24 +93,28 @@ final class ApiTokenService
         $hash      = hash('sha256', $plaintext);
         $prefix    = substr($plaintext, 0, 12);
 
-        $stmt = $this->db->pdo()->prepare(
+        $expiresSql = $expiresAt !== null ? 'FROM_UNIXTIME(?)' : 'NULL';
+        $stmt = $pdo->prepare(
             'INSERT INTO api_tokens (user_id, supplier_id, name, token_hash, prefix, scope, expires_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?)'
+             VALUES (?, ?, ?, ?, ?, ?, ' . $expiresSql . ')'
         );
-        $stmt->execute([
+        $params = [
             $userId,
             $supplierId,
             $name,
             $hash,
             $prefix,
             $scope,
-            $expiresAt?->format('Y-m-d H:i:s'),
-        ]);
+        ];
+        if ($expiresAt !== null) {
+            $params[] = $expiresAt->getTimestamp();
+        }
+        $stmt->execute($params);
 
         return [
             'plaintext' => $plaintext,
             'prefix'    => $prefix,
-            'id'        => (int) $this->db->pdo()->lastInsertId(),
+            'id'        => (int) $pdo->lastInsertId(),
         ];
     }
 

@@ -2,13 +2,15 @@
 import { ref, onMounted, computed, watch } from 'vue'
 import DateInput from '@/components/ui/DateInput.vue'
 import { useI18n } from 'vue-i18n'
-import { settingsApi, type Supplier, type SelfCopyType, type SelfCopyMode, type InvoiceCounterType, type InvoiceCounterStatusMap } from '@/api/settings'
+import { settingsApi, type Supplier, type SelfCopyType, type SelfCopyMode, type InvoiceCounterType, type InvoiceCounterStatusMap, type NaceCode, type NaceResolved } from '@/api/settings'
 import { adminApi, type SampleDataStatus } from '@/api/admin'
 import { clientsApi } from '@/api/clients'
 import { useSupplierStore } from '@/stores/supplier'
 import { useToast } from '@/composables/useToast'
 import { renderVarsymbolTemplate, hasCounterPlaceholder } from '@/utils/varsymbol'
+import { formatDate } from '@/composables/useFormat'
 import BrandingProfilesSettings from '@/components/settings/BrandingProfilesSettings.vue'
+import SearchableSelect from '@/components/ui/SearchableSelect.vue'
 
 const { t } = useI18n()
 const toast = useToast()
@@ -61,6 +63,11 @@ async function loadCommercialRegister() {
   crLoading.value = true
   try {
     const r = await clientsApi.lookupAres(ic)
+    // BUG 7: ARES u některých subjektů eviduje jen oddíl NACE (2 číslice) —
+    // prefill zůstává prázdný a uživatel má doplnit konkrétní třídu ručně.
+    if (r.found && (r.data as any)?.cz_nace_note && !(supplier.value as any)?.cz_nace_code) {
+      toast.info((r.data as any).cz_nace_note)
+    }
     if (r.found && r.data?.commercial_register && supplier.value) {
       supplier.value.commercial_register = r.data.commercial_register
       toast.success(t('settings.commercial_register_loaded'))
@@ -132,6 +139,84 @@ const creditNoteFormatError = computed(() => validateAndPreview(supplier.value?.
 const purchasePreview       = computed(() => validateAndPreview(supplier.value?.purchase_invoice_number_format ?? null).preview)
 const purchaseFormatError   = computed(() => validateAndPreview(supplier.value?.purchase_invoice_number_format ?? null).error)
 
+// EPO — klientská kontrola polí pro elektronická podání (DPH/KH/DPFO/DPPO).
+// Sada musí zůstat shodná s EpoIdentityValidator na backendu: POVINNÁ jsou jen
+// pole, která mají v EPO schématech use="required" (blokují stažení XML),
+// ostatní jsou doporučená (v XSD optional — jen upozornění).
+const epoFieldEmpty = (v: unknown) => !(v ?? '').toString().trim()
+const epoMissingLocal = computed<string[]>(() => {
+  const s = supplier.value as any
+  if (!s) return []
+  return ['financial_office_code', 'dic', 'taxpayer_type'].filter((f) => epoFieldEmpty(s[f]))
+})
+const epoRecommendedLocal = computed<string[]>(() => {
+  const s = supplier.value as any
+  if (!s) return []
+  const fields = ['workplace_code', 'email', 'phone', 'cz_nace_code']
+  if (s.taxpayer_type === 'po') fields.push('opr_jmeno', 'opr_prijmeni', 'opr_postaveni')
+  return fields.filter((f) => epoFieldEmpty(s[f]))
+})
+
+// CZ-NACE — našeptávač nad číselníkem ČINNOSTI (backend `GET /settings/nace-codes`
+// vrací jen kódy platné k dnešku). Důvod: ARES eviduje klasifikaci ještě podle
+// NACE rev. 2, jenže číselník EPO se k 1. 1. 2026 překlopil na rev. 2.1 a starým
+// kódům nastavil konec platnosti — prefill z ARES tak často přinese kód, který
+// portál odmítne propustnou chybou 30, a tady si uživatel najde nástupce.
+const naceItems = ref<NaceCode[]>([])
+const naceLoading = ref(false)
+// Kód zadaný ručně mimo číselník — nabízí se jako poslední volba, viz searchNace().
+const naceTyped = ref<string | null>(null)
+// Stav vybraného kódu: po načtení ze serveru (`cz_nace_resolved`), po výběru
+// z našeptávače (vždy platný) nebo po ručním zadání kódu mimo číselník.
+const naceResolved = ref<NaceResolved | null>(null)
+
+type NaceOption = { value: string; label: string; secondary?: string }
+const naceOptions = computed<NaceOption[]>(() => {
+  const opts: NaceOption[] = naceItems.value.map(c => ({ value: c.code, label: `${c.display} · ${c.name}` }))
+  if (naceTyped.value !== null) {
+    opts.push({ value: naceTyped.value, label: naceTyped.value, secondary: t('settings.cz_nace_use_as_typed') })
+  }
+  return opts
+})
+const naceSelected = computed(() => {
+  const code = ((supplier.value as any)?.cz_nace_code ?? '').toString()
+  if (!code) return null
+  const r = naceResolved.value
+  return { value: code, label: r && r.code === code && r.name ? `${r.display} · ${r.name}` : code }
+})
+
+async function searchNace(q: string) {
+  naceLoading.value = true
+  try {
+    const items = await settingsApi.searchNaceCodes(q, 25)
+    // Kód mimo snapshot číselníku musí jít zadat i tak — snapshot může zestárnout
+    // a backend takový kód uloží (jen upozorní na propustnou chybu 30). Bez téhle
+    // volby by se uživatel dostal do situace „platný kód nejde vybrat".
+    const digits = q.replace(/\D/g, '').slice(0, 6)
+    naceItems.value = items
+    naceTyped.value = digits.length >= 4 && !items.some(i => i.code === digits) ? digits : null
+  } catch {
+    naceItems.value = []
+    naceTyped.value = null
+  } finally {
+    naceLoading.value = false
+  }
+}
+
+function pickNace(code: string | null) {
+  const s = supplier.value as any
+  if (!s) return
+  s.cz_nace_code = code
+  const hit = code !== null ? naceItems.value.find(i => i.code === code) : undefined
+  // Našeptávač nabízí jen platné kódy; u ručně zadaného ověří stav až backend
+  // při uložení a vrátí ho v `cz_nace_resolved`.
+  naceResolved.value = code === null
+    ? null
+    : hit
+      ? { code, display: hit.display, name: hit.name, status: 'active', valid_to: null }
+      : { code, display: code, name: null, status: 'unknown', valid_to: null }
+}
+
 // Kopie odchozích e-mailů dodavateli (migrace 0102) — UI stav 'inherit' znamená
 // „klíč v self_copy chybí" = živý fallback na cfg flagy (vzor číslování faktur).
 // Explicitní volba klíč zapíše; zpět na 'inherit' ho smaže. Prázdný objekt → null.
@@ -199,6 +284,9 @@ async function load() {
   loading.value = true
   try {
     supplier.value = await settingsApi.getSupplier()
+    // Stav uloženého CZ-NACE proti číselníku dopočítává backend — díky tomu je
+    // expirovaný kód vidět hned při načtení, ne až po uložení nebo z náhledu přiznání.
+    naceResolved.value = supplier.value.cz_nace_resolved ?? null
     bumpPreview()
   } finally { loading.value = false }
   loadSampleStatus()
@@ -321,6 +409,12 @@ async function saveSupplier() {
       opr_postaveni: (supplier.value as any).opr_postaveni ?? null,
     })
     syncSupplierStore(supplier.value)
+    // CZ-NACE: server vrací uloženou kanonickou podobu + stav proti číselníku
+    // (`cz_nace_resolved` kreslíme pod polem) a u expirovaného/neznámého kódu
+    // i hotovou hlášku `cz_nace_warning`. Uložení to neblokuje.
+    naceResolved.value = supplier.value.cz_nace_resolved ?? null
+    const naceWarning = supplier.value.cz_nace_warning ?? ''
+    if (naceWarning) toast.warning(naceWarning)
     toast.success(t('common.saved'))
     bumpPreview()
   } catch (e: any) {
@@ -609,6 +703,16 @@ async function removeLogo() {
           </div>
         </div>
 
+        <!-- Uložit je v KAŽDÉM boxu nad dodavatelem (dodavatel, číslování, EPO, Pohoda) — jedno
+             tlačítko schované na konci poslední sekce nikdo nenašel: kdo vyplní číselnou řadu,
+             nemá u ní co kliknout. Popisek pojmenovává sekci, u které tlačítko stojí, ale všechna
+             volají stejné saveSupplier(), takže se vždy uloží celá stránka (rozdělaná změna
+             v jiném boxu se tedy neztratí). -->
+        <div class="mt-4 flex justify-end">
+          <button @click="saveSupplier" class="cursor-pointer px-4 h-10 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md">
+            {{ t('settings.save_supplier') }}
+          </button>
+        </div>
       </section>
 
       <BrandingProfilesSettings v-model:enabled="supplier.branding_profiles_enabled" @changed="load" />
@@ -713,11 +817,18 @@ async function removeLogo() {
           </div>
         </div>
 
+        <div class="mt-4 flex justify-end">
+          <button @click="saveSupplier" class="cursor-pointer px-4 h-10 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md">
+            {{ t('settings.save_numbering') }}
+          </button>
+        </div>
       </section>
 
       <!-- Daňové nastavení (EPO výkazy DPH/KH/DPFO/DPPO) — samostatný box -->
-      <section class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
-        <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-4">{{ t('settings.tax_section') }}</h2>
+      <section id="epo" class="bg-surface border border-neutral-200 rounded-lg p-5 shadow-sm">
+        <!-- Červený badge jen při chybějících POVINNÝCH polích (blokují stažení XML);
+             chybějící doporučená hlásíme smířlivěji — podání s nimi projde. -->
+        <h2 class="text-sm font-semibold uppercase tracking-wide text-neutral-500 mb-4">{{ t('settings.tax_section') }}<span v-if="epoMissingLocal.length > 0" class="ml-2 px-2 py-0.5 text-xs rounded-full bg-danger-50 text-danger-600 border border-danger-500/40 align-middle">{{ t('settings.epo_incomplete_badge') }}</span><span v-else-if="epoRecommendedLocal.length > 0" class="ml-2 px-2 py-0.5 text-xs rounded-full bg-warning-50 text-warning-700 border border-warning-500/40 align-middle">{{ t('settings.epo_recommended_badge') }}</span></h2>
         <div>
           <h3 class="sr-only">{{ t('settings.tax_section') }}</h3>
           <p class="text-xs text-neutral-500 mb-3">{{ t('settings.tax_hint') }}</p>
@@ -729,6 +840,7 @@ async function removeLogo() {
                 <option value="fo">{{ t('settings.taxpayer_fo') }}</option>
                 <option value="po">{{ t('settings.taxpayer_po') }}</option>
               </select>
+              <p v-if="epoFieldEmpty(supplier.taxpayer_type)" class="text-xs text-danger-500 mt-1">{{ t('settings.epo_required_hint') }}</p>
             </div>
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.vat_period') }}</label>
@@ -783,17 +895,41 @@ async function removeLogo() {
               <input v-model="supplier.financial_office_code" type="text" maxlength="8" placeholder="451"
                 class="w-full h-9 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
               <p class="text-xs text-neutral-500 mt-1">{{ t('settings.financial_office_hint') }}</p>
+              <p v-if="epoFieldEmpty(supplier.financial_office_code)" class="text-xs text-danger-500 mt-1">{{ t('settings.epo_required_hint') }}</p>
             </div>
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.workplace_code') }}</label>
-              <input v-model="supplier.workplace_code" type="text" maxlength="8"
+              <input v-model="supplier.workplace_code" type="text" maxlength="8" placeholder="2005"
                 class="w-full h-9 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+              <p class="text-xs text-neutral-500 mt-1">{{ t('settings.workplace_code_hint') }}</p>
+              <p v-if="epoFieldEmpty(supplier.workplace_code)" class="text-xs text-warning-600 mt-1">{{ t('settings.epo_recommended_hint') }}</p>
             </div>
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.cz_nace_code') }}</label>
-              <input v-model="supplier.cz_nace_code" type="text" maxlength="8" placeholder="62.01"
-                class="w-full h-9 px-3 border border-neutral-300 rounded-md text-sm font-mono" />
+              <!-- Našeptávač nad číselníkem ČINNOSTI: nabízí jen kódy platné k dnešku,
+                   ale ručně zadaný kód mimo snapshot jde vybrat taky (viz searchNace). -->
+              <SearchableSelect
+                :model-value="supplier.cz_nace_code ?? null"
+                remote
+                :loading="naceLoading"
+                :options="naceOptions"
+                :selected-option="naceSelected"
+                :placeholder="t('settings.cz_nace_placeholder')"
+                :no-results-label="t('settings.cz_nace_no_results')"
+                :loading-label="t('common.loading') + '…'"
+                @search="searchNace"
+                @update:model-value="pickNace"
+              />
               <p class="text-xs text-neutral-500 mt-1">{{ t('settings.cz_nace_hint') }}</p>
+              <!-- Stav kódu proti číselníku: expirovaný po přechodu na NACE rev. 2.1
+                   (chyba 30), nebo kód, který ve snapshotu není. Nic z toho neblokuje. -->
+              <p v-if="naceResolved?.status === 'expired'" class="text-xs text-warning-600 mt-1">
+                {{ t('settings.cz_nace_expired', { code: naceResolved.display, date: formatDate(naceResolved.valid_to) }) }}
+              </p>
+              <p v-else-if="naceResolved?.status === 'unknown'" class="text-xs text-warning-600 mt-1">
+                {{ t('settings.cz_nace_unknown', { code: naceResolved.code }) }}
+              </p>
+              <p v-else-if="epoFieldEmpty(supplier.cz_nace_code)" class="text-xs text-warning-600 mt-1">{{ t('settings.epo_recommended_hint') }}</p>
             </div>
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.data_box_id') }}</label>
@@ -820,16 +956,19 @@ async function removeLogo() {
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.opr_jmeno') }}</label>
               <input v-model="supplier.opr_jmeno" type="text" maxlength="60"
                 class="w-full h-9 px-3 border border-neutral-300 rounded-md text-sm" />
+              <p v-if="supplier.taxpayer_type === 'po' && epoFieldEmpty(supplier.opr_jmeno)" class="text-xs text-warning-600 mt-1">{{ t('settings.epo_recommended_hint') }}</p>
             </div>
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.opr_prijmeni') }}</label>
               <input v-model="supplier.opr_prijmeni" type="text" maxlength="60"
                 class="w-full h-9 px-3 border border-neutral-300 rounded-md text-sm" />
+              <p v-if="supplier.taxpayer_type === 'po' && epoFieldEmpty(supplier.opr_prijmeni)" class="text-xs text-warning-600 mt-1">{{ t('settings.epo_recommended_hint') }}</p>
             </div>
             <div>
               <label class="block text-xs font-medium text-neutral-700 mb-1">{{ t('settings.opr_postaveni') }}</label>
               <input v-model="supplier.opr_postaveni" type="text" maxlength="60" placeholder="jednatel"
                 class="w-full h-9 px-3 border border-neutral-300 rounded-md text-sm" />
+              <p v-if="supplier.taxpayer_type === 'po' && epoFieldEmpty(supplier.opr_postaveni)" class="text-xs text-warning-600 mt-1">{{ t('settings.epo_recommended_hint') }}</p>
             </div>
           </div>
 
@@ -866,6 +1005,11 @@ async function removeLogo() {
           </div>
         </div>
 
+        <div class="mt-4 flex justify-end">
+          <button @click="saveSupplier" class="cursor-pointer px-4 h-10 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md">
+            {{ t('settings.save_tax') }}
+          </button>
+        </div>
       </section>
 
       <!-- Pohoda XML export config (volitelné) — samostatný box -->
@@ -896,7 +1040,7 @@ async function removeLogo() {
 
         <div class="mt-4 flex justify-end">
           <button @click="saveSupplier" class="cursor-pointer px-4 h-10 bg-primary-600 hover:bg-primary-700 text-white text-sm font-medium rounded-md">
-            {{ t('settings.save_supplier') }}
+            {{ t('settings.save_pohoda') }}
           </button>
         </div>
       </section>

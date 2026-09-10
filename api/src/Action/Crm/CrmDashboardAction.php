@@ -168,7 +168,8 @@ final class CrmDashboardAction
         $supplierId = SupplierGuard::currentId($request);
         $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
         $userId = isset($user['id']) ? (int) $user['id'] : null;
-        return Json::ok($response, $this->crm->actionItems($supplierId, $userId));
+        $userRole = isset($user['role']) ? (string) $user['role'] : null;
+        return Json::ok($response, $this->crm->actionItems($supplierId, $userId, null, $userRole));
     }
 
     /** Dismiss action item (day / week / forever / historical). */

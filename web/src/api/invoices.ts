@@ -458,6 +458,11 @@ export const invoicesApi = {
 
   // Akce nad fakturou
   issue:    (id: number) => api.post<Invoice>(`/invoices/${id}/issue`).then(r => r.data),
+  /**
+   * „Obnovit údaje klienta" — přepíše JEN snapshoty klienta/dodavatele z live dat
+   * (admin only, funguje i u vystaveného dokladu; částky/stav/číslo se nemění).
+   */
+  rebuildSnapshots: (id: number) => api.post<Invoice>(`/invoices/${id}/rebuild-snapshots`).then(r => r.data),
   markPaid: (id: number, paidAt?: string, opts?: { sendThanks?: boolean; thanksTrigger?: 'manual' | 'bulk' }) =>
     api.post<Invoice>(`/invoices/${id}/mark-paid`, {
       paid_at: paidAt || new Date().toISOString().slice(0, 10),

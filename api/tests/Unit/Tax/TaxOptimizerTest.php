@@ -215,4 +215,35 @@ final class TaxOptimizerTest extends TestCase
         self::assertFalse($under['secondary_social']['will_cross']);
         self::assertNull($under['secondary_social']['month']);
     }
+
+    /**
+     * Změna sazby uprostřed roku (2026: 1. pásmo 9 984 → 9 162 Kč od 1. 7.):
+     * roční částka je součet rozvrhu, `monthly` je poslední platná záloha — NE
+     * průměr 114 876/12 = 9 573, který nebyl splatný v žádném měsíci.
+     */
+    public function testPausalMidYearRateChange2026(): void
+    {
+        $c = TaxConstants::forYear(2026);
+        $p = $this->opt->compare($this->profile(['flat_tax_band' => 'band1']), 900_000, $c)['pausal'];
+
+        self::assertSame(114876.0, $p['total']);
+        self::assertSame(9162, $p['monthly']);
+        self::assertSame([9984, 9162], array_column($p['monthly_periods'], 'amount'));
+        self::assertSame([6, 6], array_column($p['monthly_periods'], 'months'));
+
+        // Přeplatek za pololetí placené vyšší sazbou a o něj snížená nejbližší záloha.
+        self::assertSame('2026-07-01', $p['rate_change']['from']);
+        self::assertSame(4932.0, $p['rate_change']['overpaid']);   // (9 984 − 9 162) × 6
+        self::assertSame(4230.0, $p['rate_change']['reduced_advance']); // 9 162 − 4 932
+    }
+
+    /** Rok s jedinou sazbou: žádná změna, měsíční záloha = roční / 12. */
+    public function testPausalSingleRateYearHasNoRateChange(): void
+    {
+        $p = $this->opt->compare($this->profile(['flat_tax_band' => 'band1']), 900_000, $this->c)['pausal'];
+        self::assertSame(104592.0, $p['total']);
+        self::assertSame(8716, $p['monthly']);
+        self::assertNull($p['rate_change']);
+        self::assertCount(1, $p['monthly_periods']);
+    }
 }

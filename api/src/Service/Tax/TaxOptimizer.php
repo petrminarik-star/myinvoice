@@ -124,15 +124,78 @@ final class TaxOptimizer
         }
 
         $total = (float) $c['pausal_annual'][$band['effective']];
+        $schedule = $this->pausalSchedule($band['effective'], $c);
+
         return [
             'applicable'   => true,
             'effective'    => $band['effective'],
             'declared'     => $band['declared'],
             'surcharge'    => $band['surcharge'],
-            'monthly'      => round($total / 12, 0),
+            // Poslední platná měsíční záloha roku. NENÍ to total/12 — sazba se může
+            // změnit uprostřed roku (2026: 9 984 → 9 162 Kč od července), pak by
+            // průměr odpovídal částce, která nebyla splatná v žádném měsíci.
+            'monthly'      => $schedule['current'],
+            'monthly_periods' => $schedule['periods'],
+            'rate_change'  => $schedule['change'],
             'total'        => round($total, 0),
             'note'         => $band['effective'] !== $band['declared'] ? 'doplatek_do_vyssiho_pasma' : null,
         ];
+    }
+
+    /**
+     * Rozpad měsíčních záloh pásma v roce + popis poslední změny sazby.
+     *
+     * `change` slouží UI: při snížení zálohy uprostřed roku vzniká za už zaplacené
+     * měsíce přeplatek, o který lze snížit nejbližší zálohu (§ 38lk ZDP), nebo si
+     * o něj po skončení roku požádat. Obojí je dopočitatelné z rozvrhu.
+     *
+     * @param array<string,mixed> $c
+     * @return array{current: int|float, periods: list<array<string,mixed>>, change: ?array<string,mixed>}
+     */
+    private function pausalSchedule(string $band, array $c): array
+    {
+        $segments = PausalSchedule::normalize($c['pausal_monthly'] ?? []);
+        // Rok bereme z rozvrhu — ten je ukotvený k požadovanému roku, zatímco
+        // `year` u fallbacku nese rok převzaté tabulky.
+        $year = $segments !== []
+            ? (int) substr((string) $segments[0]['from'], 0, 4)
+            : (int) ($c['year'] ?? date('Y'));
+        $periods = [];
+        foreach (PausalSchedule::breakdown($year, $segments) as $p) {
+            $periods[] = ['from' => $p['from'], 'to' => $p['to'], 'months' => $p['months'], 'amount' => $p[$band]];
+        }
+        if ($periods === []) {
+            $monthly = round(((float) $c['pausal_annual'][$band]) / 12, 2);
+            return ['current' => $monthly, 'periods' => [], 'change' => null];
+        }
+
+        $last = $periods[count($periods) - 1];
+        $change = null;
+        if (count($periods) > 1) {
+            $prev = $periods[count($periods) - 2];
+            $diff = (float) $prev['amount'] - (float) $last['amount'];
+            // Měsíce zaplacené starou (vyšší) sazbou → přeplatek, o který jde snížit
+            // nejbližší zálohu. Při zvýšení sazby přeplatek nevzniká (nedoplatek se
+            // řeší až vyúčtováním), proto jen kladný rozdíl.
+            $monthsAtPrev = 0;
+            foreach ($periods as $p) {
+                if ($p['from'] < $last['from']) {
+                    $monthsAtPrev += (int) $p['months'];
+                }
+            }
+            $overpaid = $diff > 0 ? round($diff * $monthsAtPrev, 0) : 0.0;
+            $change = [
+                'from'             => $last['from'],
+                'previous_monthly' => $prev['amount'],
+                'monthly'          => $last['amount'],
+                'months_at_previous' => $monthsAtPrev,
+                'overpaid'         => $overpaid,
+                // Snížená nejbližší záloha; přeplatek větší než záloha se přenáší dál.
+                'reduced_advance'  => $overpaid > 0 ? round(max(0.0, (float) $last['amount'] - $overpaid), 0) : null,
+            ];
+        }
+
+        return ['current' => $last['amount'], 'periods' => $periods, 'change' => $change];
     }
 
     /**

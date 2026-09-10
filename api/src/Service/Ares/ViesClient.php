@@ -21,6 +21,9 @@ use Psr\Log\LoggerInterface;
  * VIES pro CZ data čerpá odtud s delay a při výpadcích vrací false-negative
  * (isValid:false + name/address vyplněné placeholderem "---" z viesApproximate),
  * což se zacachuje a uživateli pak svítí nepravdivé "DIČ není platné".
+ *
+ * CZ skupinové registrace DPH (DIČ s kmenem 699xxxxxx) VIES neeviduje vůbec →
+ * vracel by trvalý false-negative. Ověřují se v registru plátců DPH (CrpDphClient).
  */
 final class ViesClient
 {
@@ -29,10 +32,11 @@ final class ViesClient
         private readonly Connection $db,
         private readonly LoggerInterface $logger,
         private readonly AresClient $ares,
+        private readonly CrpDphClient $crpdph,
     ) {}
 
     /**
-     * @return array{valid:bool, name?:string, address?:string, country?:string, vat_number?:string, source:'cache'|'rest'|'soap'|'ares'|'error'}
+     * @return array{valid:bool, name?:string, address?:string, country?:string, vat_number?:string, group_registration?:bool, source:'cache'|'rest'|'soap'|'ares'|'crpdph'|'error'}
      */
     public function lookup(string $vatId): array
     {
@@ -42,6 +46,14 @@ final class ViesClient
         }
         $country = $m[1];
         $number  = $m[2];
+
+        // CZ skupinová registrace DPH (kmenová část 699xxxxxx): VIES DPH skupiny
+        // neeviduje → vracel by false-negative „DIČ není platné". Autoritativní je
+        // registr plátců DPH (CRPDPH). Záměrně PŘED vies_cache — dřívější zacachované
+        // false-negativy z VIES nesmí výsledek přebít; TTL řeší vlastní cache CrpDphClient.
+        if ($country === 'CZ' && str_starts_with($number, '699')) {
+            return $this->tryCrpDph($number, $vatId);
+        }
 
         $cached = $this->fromCache($vatId);
         if ($cached !== null) {
@@ -118,6 +130,43 @@ final class ViesClient
             'country'    => 'CZ',
             'vat_number' => $vatId,
             'source'     => 'ares',
+        ];
+    }
+
+    /**
+     * CZ skupinové DIČ (kmen 699*) — ověření přes registr plátců DPH (CRPDPH),
+     * protože VIES skupinové registrace DPH vůbec neobsahuje. Registr nevrací
+     * název ani adresu subjektu (jen status + zveřejněné účty) → name/address
+     * necháváme prázdné. found=true = registrovaný plátce (status != NENALEZEN).
+     *
+     * Nedostupnost/timeout služby mapujeme na stejné chování jako výpadek VIES
+     * (source 'error' = „služba nedostupná") — NIKDY tvrdé invalid.
+     *
+     * @return array{valid:bool, name?:string, address?:string, parsed?:null, country?:string, vat_number?:string, group_registration?:bool, source:'crpdph'|'error'}
+     */
+    private function tryCrpDph(string $number, string $vatId): array
+    {
+        try {
+            $r = $this->crpdph->lookup($number);
+        } catch (\Throwable $e) {
+            $this->logger->warning('CRPDPH ověření skupinového DIČ selhalo: ' . $e->getMessage(), ['vat' => $vatId]);
+            return ['valid' => false, 'source' => 'error'];
+        }
+        if (($r['source'] ?? '') === 'error') {
+            // Registr neodpověděl / není nakonfigurovaný → jako výpadek VIES.
+            return ['valid' => false, 'source' => 'error'];
+        }
+
+        return [
+            'valid'      => (bool) ($r['found'] ?? false),
+            'name'       => '', // registr plátců DPH název subjektu nevrací
+            'address'    => '',
+            'parsed'     => null,
+            'country'    => 'CZ',
+            'vat_number' => $vatId,
+            'source'     => 'crpdph',
+            // Skupinová registrace DPH — ověřeno v registru plátců DPH (MFČR), ne ve VIES.
+            'group_registration' => true,
         ];
     }
 

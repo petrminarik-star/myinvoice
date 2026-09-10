@@ -39,6 +39,8 @@ final class SettingsAction
         private readonly InvoicePdfRenderer $pdf,
         private readonly Config $config,
         private readonly \MyInvoice\Service\Ares\SupplierRegistryEnricher $enricher,
+        private readonly \MyInvoice\Service\Report\EpoIdentityValidator $epoValidator,
+        private readonly \MyInvoice\Repository\UserSupplierRepository $userSuppliers,
     ) {}
 
     /** Aktuální supplier (z X-Supplier-Id middleware). */
@@ -55,18 +57,28 @@ final class SettingsAction
         return $this->updateSupplierById($request, $response, ['id' => (string) $id]);
     }
 
-    /** GET /api/suppliers — list všech (pro switcher). */
+    /** GET /api/suppliers — list pro switcher. Uživatel s membership vidí jen přiřazené firmy. */
     public function listSuppliers(Request $request, Response $response): Response
     {
-        $rows = $this->db->pdo()->query(
+        $allowed = $this->allowedSupplierIds($request);
+        $where   = '';
+        $params  = [];
+        if ($allowed !== []) {
+            $where  = ' WHERE s.id IN (' . implode(',', array_fill(0, count($allowed), '?')) . ')';
+            $params = $allowed;
+        }
+        $stmt = $this->db->pdo()->prepare(
             'SELECT s.id, s.company_name, s.display_name, s.ic, s.dic, s.is_vat_payer,
                     s.email, c.iso2 AS country_iso,
                     (SELECT COUNT(*) FROM clients cl  WHERE cl.supplier_id  = s.id) AS clients_count,
                     (SELECT COUNT(*) FROM invoices i  WHERE i.supplier_id   = s.id) AS invoices_count
                FROM supplier s
-               JOIN countries c ON c.id = s.country_id
-           ORDER BY s.id'
-        )->fetchAll(\PDO::FETCH_ASSOC);
+               JOIN countries c ON c.id = s.country_id'
+            . $where .
+            ' ORDER BY s.id'
+        );
+        $stmt->execute($params);
+        $rows = $stmt->fetchAll(\PDO::FETCH_ASSOC);
         foreach ($rows as &$r) {
             $r['id']             = (int) $r['id'];
             $r['is_vat_payer']   = (bool) $r['is_vat_payer'];
@@ -76,10 +88,36 @@ final class SettingsAction
         return Json::ok($response, $rows);
     }
 
-    /** GET /api/suppliers/{id}. */
+    /** GET /api/suppliers/{id}. Firma mimo membership → 404 (konvence pro cizí entity). */
     public function getSupplierById(Request $request, Response $response, array $args): Response
     {
-        return $this->respondSupplier($response, (int) ($args['id'] ?? 0));
+        $id = (int) ($args['id'] ?? 0);
+        if ($this->membershipDenies($request, $id)) {
+            return Json::error($response, 'not_found', 'Supplier nenalezen.', 404);
+        }
+        return $this->respondSupplier($response, $id);
+    }
+
+    /**
+     * Povolené firmy uživatele z requestu; prázdné pole = bez omezení.
+     * Globální admin vidí všechny firmy (konzistentně se SupplierAccessResolver,
+     * který adminy z membershipu vyjímá — jinak by si adminovi s membershipem
+     * ořízlo přepínač firem).
+     *
+     * @return list<int>
+     */
+    private function allowedSupplierIds(Request $request): array
+    {
+        $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
+        if (($user['role'] ?? '') === 'admin') return [];
+        return $this->userSuppliers->allowedSupplierIds((int) ($user['id'] ?? 0));
+    }
+
+    /** True = uživatel má neprázdné membership a $supplierId v něm není. Globální admin nikdy (vidí vše). */
+    private function membershipDenies(Request $request, int $supplierId): bool
+    {
+        $allowed = $this->allowedSupplierIds($request);
+        return $allowed !== [] && !in_array($supplierId, $allowed, true);
     }
 
     /** POST /api/suppliers — nový supplier (admin). */
@@ -213,6 +251,9 @@ final class SettingsAction
         if (!$this->guard($request, $response, $err)) return $err;
         $id = (int) ($args['id'] ?? 0);
         if ($id <= 0) return Json::error($response, 'validation_failed', 'Neplatné id.', 400);
+        if ($this->membershipDenies($request, $id)) {
+            return Json::error($response, 'not_found', 'Supplier nenalezen.', 404);
+        }
 
         $body = (array) ($request->getParsedBody() ?? []);
         if (!$this->supplierHasColumn('oss_enabled')) {
@@ -334,6 +375,43 @@ final class SettingsAction
                 }
             }
         }
+        // CZ-NACE (c_okec v DPHDP3, BUG 7): kanonizace proti snapshotu číselníku
+        // ČINNOSTI (OKEC) Daňového portálu — viz EpoOkecCodebook. Zápis dle ČSÚ
+        // se dohledá doplněním nul zprava (73.11 / 7311 → 731100), kanonické
+        // hodnoty číselníku vč. bez-nulových kódů sekcí 01–09 („14800") projdou
+        // beze změny. Dvoumístný oddíl z ARES („74") v číselníku neexistuje →
+        // EPO propustná chyba 30; takový vstup se NEUKLÁDÁ. Kód expirovaný
+        // (přechod číselníku na NACE rev. 2.1 k 1. 1. 2026) nebo neznámý se
+        // ukládá — snapshot může zestárnout, neblokujeme — ale odpověď nese
+        // `cz_nace_warning`, které UI zobrazí u pole.
+        $czNaceWarning = null;
+        if (array_key_exists('cz_nace_code', $body) && $body['cz_nace_code'] !== null
+            && trim((string) $body['cz_nace_code']) !== ''
+        ) {
+            $resolvedNace = \MyInvoice\Service\Report\EpoOkecCodebook::normalize((string) $body['cz_nace_code']);
+            if ($resolvedNace === null) {
+                return Json::error($response, 'validation_failed',
+                    'CZ-NACE musí být alespoň 4místný kód třídy (např. 73.11). Dvoumístný oddíl z ARES nestačí, EPO ho v číselníku nenajde.',
+                    422);
+            }
+            $body['cz_nace_code'] = $resolvedNace['code'];
+            if ($resolvedNace['status'] === \MyInvoice\Service\Report\EpoOkecCodebook::STATUS_EXPIRED) {
+                $czNaceWarning = sprintf(
+                    'Kód CZ-NACE %s (%s) měl v číselníku EPO platnost do %s — číselník přešel na NACE rev. 2.1. '
+                    . 'Kód se uložil, ale EPO by podání odmítlo propustnou chybou 30; vyber aktuální kód činnosti '
+                    . '(Daňový portál → Dokumentace → Rozhraní číselníků → ČINNOSTI).',
+                    $resolvedNace['code'],
+                    mb_strtolower((string) $resolvedNace['name']),
+                    (new \DateTimeImmutable((string) $resolvedNace['valid_to']))->format('j. n. Y')
+                );
+            } elseif ($resolvedNace['status'] === \MyInvoice\Service\Report\EpoOkecCodebook::STATUS_UNKNOWN) {
+                $czNaceWarning = sprintf(
+                    'Kód CZ-NACE %s není ve snapshotu číselníku EPO. Kód se uložil — pokud jde o novou hodnotu '
+                    . 'číselníku, je vše v pořádku; jinak hrozí při podání propustná chyba 30.',
+                    $resolvedNace['code']
+                );
+            }
+        }
         // Empty string → null pro tax fields (NULL = nevyplněno)
         foreach (['taxpayer_type', 'vat_period', 'financial_office_code', 'workplace_code',
                   'cz_nace_code', 'data_box_id',
@@ -446,7 +524,22 @@ final class SettingsAction
             $this->pdf->invalidateDraftsBySupplier($id);
         }
         $this->log($request, 'supplier.updated', $id, ['fields' => array_keys(array_intersect_key($body, array_flip($allowed)))]);
-        return $this->respondSupplier($response, $id);
+        // EPO připravenost (informativně, uložení neblokuje): plátce-PO dostane
+        // v odpovědi epo_ready + seznam chybějících XSD-povinných polí pro EPO
+        // podání (kód FÚ, DIČ, typ poplatníka) — UI z toho staví hint/badge.
+        // Doporučená pole (ÚzP, e-mail, opr_*) sem nepatří, ta podání neblokují.
+        $extra = [];
+        $cur = $this->db->pdo()->prepare('SELECT taxpayer_type, is_vat_payer FROM supplier WHERE id = ?');
+        $cur->execute([$id]);
+        $curRow = $cur->fetch(\PDO::FETCH_ASSOC) ?: [];
+        if (($curRow['taxpayer_type'] ?? null) === 'po' && !empty($curRow['is_vat_payer'])) {
+            $epo = $this->epoValidator->forSupplier($id, \MyInvoice\Service\Report\EpoIdentityValidator::DOC_DPHDP3);
+            $extra = ['epo_ready' => $epo['missing'] === [], 'missing' => $epo['missing']];
+        }
+        if ($czNaceWarning !== null) {
+            $extra['cz_nace_warning'] = $czNaceWarning;
+        }
+        return $this->respondSupplier($response, $id, $extra);
     }
 
     /** DELETE /api/suppliers/{id} — jen pokud supplier nemá clients/invoices/currencies s daty. */
@@ -455,6 +548,9 @@ final class SettingsAction
         if (!$this->guard($request, $response, $err)) return $err;
         $id = (int) ($args['id'] ?? 0);
         if ($id <= 0) return Json::error($response, 'validation_failed', 'Neplatné id.', 400);
+        if ($this->membershipDenies($request, $id)) {
+            return Json::error($response, 'not_found', 'Supplier nenalezen.', 404);
+        }
 
         $pdo = $this->db->pdo();
         $count = (int) $pdo->query("SELECT COUNT(*) FROM supplier")->fetchColumn();
@@ -484,6 +580,10 @@ final class SettingsAction
             try {
                 $pdo->prepare('DELETE FROM invoice_counters WHERE supplier_id = ?')->execute([$id]);
                 $pdo->prepare('DELETE FROM currencies WHERE supplier_id = ?')->execute([$id]);
+                // Membership (migrace 0148) má ON DELETE CASCADE, ale s vypnutým
+                // FOREIGN_KEY_CHECKS se NEPROVEDE — musíme uklidit ručně. Jinak by
+                // omezenému uživateli zůstal v setu neexistující dodavatel.
+                $this->userSuppliers->deleteForSupplier($id);
                 $pdo->prepare('DELETE FROM supplier WHERE id = ?')->execute([$id]);
             } finally {
                 $pdo->exec('SET FOREIGN_KEY_CHECKS = 1');
@@ -512,7 +612,8 @@ final class SettingsAction
         return Json::ok($response, ['deleted' => true]);
     }
 
-    private function respondSupplier(Response $response, int $id): Response
+    /** @param array<string,mixed> $extra doplňkové klíče odpovědi (např. epo_ready/missing po update) */
+    private function respondSupplier(Response $response, int $id, array $extra = []): Response
     {
         if ($id <= 0) return Json::error($response, 'not_found', 'Supplier nenalezen.', 404);
         $stmt = $this->db->pdo()->prepare(
@@ -595,7 +696,14 @@ final class SettingsAction
             // Přijaté faktury nemají cfg fallback — výchozí je vestavěná šablona generátoru.
             'purchase'    => \MyInvoice\Repository\PurchaseInvoiceRepository::PURCHASE_DEFAULT_TEMPLATE,
         ];
-        return Json::ok($response, $row);
+        // Uložený CZ-NACE kód přeložený přes číselník ČINNOSTI (název činnosti +
+        // stav platnosti). Díky tomu UI ukáže u pole, co kód znamená, a případnou
+        // expiraci po přechodu na NACE rev. 2.1 vidí uživatel hned při načtení
+        // Nastavení, ne až po uložení nebo z náhledu přiznání.
+        $row['cz_nace_resolved'] = \MyInvoice\Service\Report\EpoOkecCodebook::describe(
+            $row['cz_nace_code'] ?? null
+        );
+        return Json::ok($response, array_merge($row, $extra));
     }
 
     private function nullable(array $b, string $key): ?string

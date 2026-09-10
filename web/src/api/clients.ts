@@ -100,8 +100,12 @@ export interface ProjectSummary {
 export interface VatStatusResult {
   id: number
   is_vat_payer: boolean
-  /** Zdroj výsledku: 'ares' (CZ dle IČO), 'vies' (zahr. dle DIČ), 'unknown' (nezjištěno → uložený příznak). */
-  source: 'ares' | 'vies' | 'unknown'
+  /**
+   * Zdroj výsledku: 'ares' (CZ dle IČO), 'vies' (zahr. dle DIČ), 'crpdph'
+   * (skupinová registrace CZ699… ověřená v registru plátců DPH — VIES ji nezná),
+   * 'unknown' (nezjištěno → uložený příznak).
+   */
+  source: 'ares' | 'vies' | 'crpdph' | 'unknown'
   ic: string | null
   dic: string | null
 }
@@ -124,6 +128,10 @@ export interface AresLookupResult {
     commercial_register?: string
     /** Typ poplatníka odvozený z právní formy: 'fo' = OSVČ (DPFO), 'po' = firma (DPPO), '' = neurčeno. */
     taxpayer_type?: 'fo' | 'po' | ''
+    /** Převažující CZ-NACE kanonizovaná proti číselníku ČINNOSTI (EpoOkecCodebook); '' když ARES eviduje jen oddíl (viz cz_nace_note). */
+    cz_nace_code?: string
+    /** Poznámka pro UI, když ARES eviduje jen oddíl NACE (<4 číslice) — uživatel doplní třídu ručně. */
+    cz_nace_note?: string
   }
 }
 
@@ -147,7 +155,10 @@ export interface BankLookupResult {
 
 export interface ViesLookupResult {
   valid: boolean
-  source: 'cache' | 'rest' | 'soap' | 'ares' | 'error'
+  // 'crpdph' = česká skupinová registrace (CZ699…) ověřená v registru plátců DPH, ne ve VIES
+  source: 'cache' | 'rest' | 'soap' | 'ares' | 'crpdph' | 'error'
+  /** True u DIČ skupinové registrace (CZ699…) — skupiny ve VIES nejsou. */
+  group_registration?: boolean
   name?: string
   address?: string
   parsed?: {

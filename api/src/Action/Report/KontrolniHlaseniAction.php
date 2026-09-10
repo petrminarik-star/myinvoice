@@ -28,7 +28,21 @@ final class KontrolniHlaseniAction
         private readonly IpMatcher $ipMatcher,
         private readonly \MyInvoice\Service\Report\TaxSubmissionArchiver $archiver,
         private readonly \MyInvoice\Service\Currency\MissingExchangeRateFiller $rateFiller,
+        private readonly \MyInvoice\Service\Report\EpoIdentityValidator $epoValidator,
     ) {}
+
+    /**
+     * EPO identifikace: chybějící XSD-povinná pole (kód FÚ, DIČ, typ poplatníka)
+     * → 422 při STAŽENÍ XML. Bez nich vznikne validně vypadající XML, které EPO
+     * odmítne — uživatel to dřív zjistil až na Moje daně v den lhůty. Náhled se
+     * neblokuje (chybějící pole vrací v `missing[]` vedle summary).
+     */
+    private function epoIdentityError(Response $response, array $missing): Response
+    {
+        return Json::error($response, 'epo_identity_incomplete',
+            'Nelze vygenerovat XML — chybí povinné údaje pro EPO podání. Doplň je v Nastavení → Daňové nastavení.',
+            422, ['missing' => $missing, 'settings_url' => '/admin/settings#epo']);
+    }
 
     public function preview(Request $request, Response $response): Response
     {
@@ -41,6 +55,11 @@ final class KontrolniHlaseniAction
         if ($year === null) {
             return Json::error($response, 'validation_failed', 'Neplatný rok/měsíc.', 400);
         }
+        // Náhled se NEBLOKUJE ani při chybějící identifikaci — čísla výkazu si
+        // uživatel musí umět zobrazit (i kdyby je jen opisoval do formuláře na
+        // EPO webu). Chybějící povinná pole jdou do `missing[]`, na jejich
+        // základě UI zakáže stažení XML.
+        $epo = $this->epoValidator->forSupplier($supplierId, \MyInvoice\Service\Report\EpoIdentityValidator::DOC_DPHKH1);
         try {
             $result = $this->builder->build($supplierId, $year, $month, $period);
         } catch (\Throwable $e) {
@@ -48,7 +67,9 @@ final class KontrolniHlaseniAction
         }
         return Json::ok($response, [
             'summary'  => $result['summary'],
-            'warnings' => $result['warnings'],
+            'missing'  => $epo['missing'],
+            // Doporučená pole (ÚzP, e-mail, opr_*, telefon…) jen varují.
+            'warnings' => array_merge($result['warnings'], $epo['warnings']),
         ]);
     }
 
@@ -63,12 +84,25 @@ final class KontrolniHlaseniAction
         if ($year === null) {
             return Json::error($response, 'validation_failed', 'Neplatný rok/měsíc.', 400);
         }
+        $epo = $this->epoValidator->forSupplier($supplierId, \MyInvoice\Service\Report\EpoIdentityValidator::DOC_DPHKH1);
+        if ($epo['missing'] !== []) {
+            return $this->epoIdentityError($response, $epo['missing']);
+        }
+        // Forma podání (B/O/N/E) + datum zjištění důvodů pro následné KH (§ 101f).
+        $fp = \MyInvoice\Service\Report\ReportFormParams::fromQuery(
+            $request->getQueryParams(),
+            KontrolniHlaseniBuilder::FORMS,
+            KontrolniHlaseniBuilder::FORMS_REQUIRING_DZJIST,
+        );
+        if ($fp['error'] !== null) {
+            return Json::error($response, 'validation_failed', $fp['error'], 400);
+        }
         try {
-            $result = $this->builder->build($supplierId, $year, $month, $period);
+            $result = $this->builder->build($supplierId, $year, $month, $period, $fp['form'], $fp['d_zjist']);
             // #238: doplň chybějící kurzy z ČNB a přebuildi; tvrdá chyba jen když ČNB nemá.
             if (!empty($result['missing_rates'])) {
                 $this->rateFiller->fill($supplierId, $result['missing_rates']);
-                $result = $this->builder->build($supplierId, $year, $month, $period);
+                $result = $this->builder->build($supplierId, $year, $month, $period, $fp['form'], $fp['d_zjist']);
                 if (!empty($result['missing_rates'])) {
                     $labels = \MyInvoice\Service\Report\VatLedgerService::missingExchangeRateLabels($result['missing_rates']);
                     return Json::error($response, 'exchange_rate_missing',

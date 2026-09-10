@@ -167,8 +167,8 @@ export const integrationsApi = {
   },
 
   // Shared job tracking
-  getJob: (id: number) =>
-    api.get<ImportJob>(`/admin/imports/${id}`).then(r => r.data),
+  getJob: (id: number, signal?: AbortSignal) =>
+    api.get<ImportJob>(`/admin/imports/${id}`, { signal }).then(r => r.data),
   cancelJob: (id: number) =>
     api.post<{ ok: boolean; cancel_requested: boolean }>(`/admin/imports/${id}/cancel`).then(r => r.data),
   deleteJob: (id: number) =>

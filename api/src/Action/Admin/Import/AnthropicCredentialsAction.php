@@ -36,10 +36,17 @@ final class AnthropicCredentialsAction
         private readonly IpMatcher $ipMatcher,
     ) {}
 
+    /**
+     * Stav integrace — bez tajemství (configured / model / počet extrakcí), proto ho
+     * smí číst i účetní: potřebuje na stránce Import vědět, zda PDF bez ISDOC projde
+     * přes AI. Zápis klíče (update/delete) zůstává admin-only.
+     */
     public function status(Request $request, Response $response): Response
     {
         $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
-        if (($user['role'] ?? '') !== 'admin') return Json::error($response, 'forbidden', 'Pouze admin.', 403);
+        if (!in_array(($user['role'] ?? ''), ['admin', 'accountant'], true)) {
+            return Json::error($response, 'forbidden', 'Pouze admin nebo účetní.', 403);
+        }
         $supplierId = SupplierGuard::currentId($request);
         $creds = $this->anthropic->getCredentials($supplierId);
 

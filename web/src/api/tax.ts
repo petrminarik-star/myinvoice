@@ -17,9 +17,23 @@ export interface TaxProfile {
   saved?: boolean
 }
 
+/**
+ * Měsíční záloha paušální daně platná od `from` do dalšího segmentu. Sazba se může
+ * změnit uprostřed roku (2026: 1. pásmo 9 984 → 9 162 Kč od 1. 7.), roční částka
+ * v `pausal_annual` je z tohoto rozvrhu odvozená (backend `PausalSchedule`).
+ */
+export interface PausalSegment {
+  from: string
+  band1: number
+  band2: number
+  band3: number
+}
+
 /** Roční konstanty (tvar TaxConstants::forYear z backendu). Volné typování — engine je čte dynamicky. */
 export interface TaxConstantsData {
   year: number
+  pausal_monthly: PausalSegment[]
+  /** Odvozené (součet 12 měsíčních záloh roku) — read-only, neukládá se. */
   pausal_annual: Record<string, number>
   band_ceilings: Record<string, Record<string, number>>
   credit_taxpayer: number

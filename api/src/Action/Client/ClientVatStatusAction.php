@@ -45,7 +45,7 @@ final class ClientVatStatusAction
         return Json::ok($response, [
             'id'           => $id,
             'is_vat_payer' => $isVatPayer,
-            'source'       => $res['source'],   // 'ares' | 'vies' | 'unknown'
+            'source'       => $res['source'],   // 'ares' | 'vies' | 'crpdph' | 'unknown'
             'ic'           => $ic,
             'dic'          => $dic,
         ]);

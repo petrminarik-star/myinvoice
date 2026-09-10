@@ -3,7 +3,7 @@
 # Services:
 #   app     — PHP 8.5 + nginx + php-fpm (built from Dockerfile.alpine)
 #   db      — MariaDB 11 with persistent volume
-#   redis   — optional cache/session backend (profile: redis)
+#   redis   — optional cache/rate-limit backend (profile: redis)
 #
 # Default image je alpine/nginx (~92 MB, méně RAM). Debian/Apache fallback:
 # `docker build -f Dockerfile -t myinvoice:latest .` (Dockerfile zůstává v repu, CI ho nepublikuje).
@@ -50,9 +50,14 @@ services:
       # Vestavěný cron v app kontejneru (default 1). Při více replikách app nastav 0
       # v jedné běžící replice ho nech zapnutý, jinak by úlohy běžely vícenásobně.
       MYINVOICE_ENABLE_CRON: ${MYINVOICE_ENABLE_CRON:-1}
+      # Prázdné hodnoty nepřebíjí cfg.docker.php; politiku lze nastavit v .env.
+      MYINVOICE_AUTH_REQUIRE_MFA: ${MYINVOICE_AUTH_REQUIRE_MFA:-}
+      MYINVOICE_AUTH_MFA_METHODS: ${MYINVOICE_AUTH_MFA_METHODS:-}
+      MYINVOICE_AUTH_PASSWORDLESS_LOGIN: ${MYINVOICE_AUTH_PASSWORDLESS_LOGIN:-}
+      MYINVOICE_SESSION_LOCK_AFTER_MINUTES: ${MYINVOICE_SESSION_LOCK_AFTER_MINUTES:-}
 
   db:
-    image: mariadb:11
+    image: mariadb:11.8
     restart: unless-stopped
     # Tuning pro hosting s málo pamětí/diskem:
     #   - performance_schema OFF → ~100–200 MB méně RAM
@@ -63,6 +68,9 @@ services:
       - --performance-schema=OFF
       - --innodb-buffer-pool-size=${DB_INNODB_BUFFER_POOL:-128M}
       - --innodb-log-file-size=${DB_INNODB_LOG_SIZE:-48M}
+      # Default 16 MB nestačí na dump ani obnovu s přílohami do 50 MB
+      # (documents.max_file_bytes) — kontrola prostředí to hlásí jako varování.
+      - --max-allowed-packet=${DB_MAX_ALLOWED_PACKET:-64M}
     environment:
       # Fail-closed: bez .env se stack nespustí (žádný předvídatelný default).
       # docker-install.{sh,ps1} vygeneruje .env s náhodnými hesly před `up`.

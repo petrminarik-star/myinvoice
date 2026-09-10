@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { overdueDays } from '@/utils/date'
 import LinkedDocumentsPanel from '@/components/documents/LinkedDocumentsPanel.vue'
 import DateInput from '@/components/ui/DateInput.vue'
 import { ref, computed, onMounted, watch } from 'vue'
@@ -494,6 +495,8 @@ function actionLabel(a: string): string {
     'invoice.created': 'invoice.actions.created',
     'invoice.updated': 'invoice.actions.updated',
     'invoice.force_updated': 'invoice.actions.force_updated',
+    'invoice.force_edit': 'invoice.actions.force_edit',
+    'invoice.rebuild_snapshots': 'invoice.actions.rebuild_snapshots',
     'invoice.issued': 'invoice.actions.issued',
     'invoice.paid': 'invoice.actions.paid',
     'invoice.cancelled': 'invoice.actions.cancelled',
@@ -865,12 +868,30 @@ async function cloneInvoice() {
 
 function editIssued() {
   if (!invoice.value) return
-  const ok = confirm(t('invoice.edit_issued_confirm', {
-    varsymbol: invoice.value.varsymbol || '',
-    sent: invoice.value.sent_at ? t('invoice.edit_issued_confirm_sent') : '',
-  }))
-  if (!ok) return
-  router.push(`/invoices/${invoice.value.id}/edit?force=1`)
+  // Bez ?force=1 — editor se otevře uzamčený a odemyká se až potvrzovacím
+  // modalem s checkboxem přímo v něm (příznak nepřežije reload).
+  router.push(`/invoices/${invoice.value.id}/edit`)
+}
+
+// „Obnovit údaje klienta" — lehčí alternativa force-editu: přepíše JEN snapshoty
+// odběratele, dodavatele a bankovního spojení z aktuálních live dat a zneplatní
+// PDF (stará verze se archivuje); částky, stav i číslo dokladu zůstávají.
+// Pozor na motivaci: na výkazy DPH akce NEMÁ vliv — VatLedgerService čte DIČ
+// protistrany z živé tabulky `clients`, ne ze snapshotu. Projeví se jen v PDF
+// a v exportech, které snapshoty čtou (ISDOC, Pohoda). Admin only, auditováno.
+async function rebuildSnapshots() {
+  if (!invoice.value) return
+  if (!confirm(t('invoice.rebuild_snapshots_confirm', { varsymbol: invoice.value.varsymbol || '' }))) return
+  busy.value = 'rebuild-snapshots'
+  try {
+    invoice.value = await invoicesApi.rebuildSnapshots(invoice.value.id)
+    toast.success(t('invoice.rebuild_snapshots_done'))
+    invoicesApi.activity(invoice.value.id).then(a => (activity.value = a)).catch(() => {})
+  } catch (e: any) {
+    toast.error(apiErrorMessage(e, t('invoice.operation_failed')))
+  } finally {
+    busy.value = null
+  }
 }
 
 function downloadPdf() {
@@ -1079,19 +1100,12 @@ const canSendReminder = computed(() => {
   if (!['issued', 'sent', 'reminded'].includes(invoice.value.status)) return false
   if ((invoice.value.payment_method ?? 'bank_transfer') !== 'bank_transfer') return false
   if (Number(invoice.value.amount_to_pay ?? 0) <= 0) return false
-  const due = new Date(invoice.value.due_date)
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-  return due < today
+  return overdueDays(invoice.value.due_date) > 0
 })
 
 const daysOverdue = computed(() => {
   if (!invoice.value) return 0
-  const due = new Date(invoice.value.due_date)
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
-  due.setHours(0, 0, 0, 0)
-  return Math.max(0, Math.floor((today.getTime() - due.getTime()) / 86_400_000))
+  return overdueDays(invoice.value.due_date)
 })
 
 // #86 — příjemci upomínky z resolveru (kontakty s účelem `reminders`, fallback documents/main).
@@ -1282,6 +1296,11 @@ const invoiceActions = computed<ActionItem[]>(() => {
       to: { name: 'recurring-new', query: { from_invoice: inv.id } } },
     { key: 'edit-admin', label: t('invoice.edit_admin'), icon: 'edit', tier: 'advanced', variant: 'warning',
       show: canAdminEdit.value, disabled: b, run: editIssued },
+    // Lehčí operace než force-edit: přepíše jen snapshoty klienta, dodavatele
+    // a bankovního spojení z live dat — bez odemykání formuláře. Ovlivní PDF
+    // a exporty (ISDOC/Pohoda), na výkazy DPH vliv nemá (viz rebuildSnapshots).
+    { key: 'rebuild-snapshots', label: t('invoice.rebuild_snapshots'), icon: 'cycle', tier: 'advanced', variant: 'warning',
+      show: canAdminEdit.value, disabled: b, loading: busy.value === 'rebuild-snapshots', run: rebuildSnapshots },
     { key: 'unmark-paid', label: t('invoice.unmark_paid'), icon: 'uturn', tier: 'advanced', variant: 'warning',
       show: isAdmin.value && inv.status === 'paid', disabled: b, loading: busy.value === 'unmark-paid', run: unmarkPaid },
     { key: 'cancel', label: isCreditNoteSource.value ? t('invoice.cancel_credit_note') : t('invoice.cancel_or_credit'),

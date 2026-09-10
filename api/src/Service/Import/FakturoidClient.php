@@ -281,12 +281,32 @@ final class FakturoidClient
 
     /**
      * Stáhne přílohu výdaje (originální doklad od dodavatele). Fakturoid vrací
-     * v expense JSON pole `attachment` jako URL — stáhneme ho s autorizací.
+     * v expense JSON pole `attachments[]`, každá položka má absolutní
+     * `download_url` (https://app.fakturoid.cz/api/v3/accounts/…/download) —
+     * stáhneme ho s autorizací.
+     *
+     * URL je cizí vstup z API odpovědi, a protože na ni posíláme Authorization
+     * hlavičku, pouštíme dál jen https na fakturoid.cz (jinak by přesměrovaná /
+     * podvržená URL vynesla credentials na cizí host).
      */
     public function downloadAttachment(int $supplierId, string $attachmentUrl): ?string
     {
         if ($attachmentUrl === '') return null;
+        if (!self::isFakturoidUrl($attachmentUrl)) {
+            $this->logger->warning('Fakturoid: příloha na cizí URL, stažení odmítnuto', ['url' => $attachmentUrl]);
+            return null;
+        }
         return $this->binaryGet($supplierId, $attachmentUrl, absolute: true);
+    }
+
+    /** https URL na fakturoid.cz (vč. subdomén) — jinam se auth hlavičky neposílají. */
+    public static function isFakturoidUrl(string $url): bool
+    {
+        $parts = parse_url($url);
+        if ($parts === false || strtolower((string) ($parts['scheme'] ?? '')) !== 'https') return false;
+
+        $host = strtolower((string) ($parts['host'] ?? ''));
+        return $host === 'fakturoid.cz' || str_ends_with($host, '.fakturoid.cz');
     }
 
     /**

@@ -7,6 +7,7 @@ namespace MyInvoice\Tests\Unit\Service\Ares;
 use MyInvoice\Infrastructure\Config\Config;
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Service\Ares\AresClient;
+use MyInvoice\Service\Ares\CrpDphClient;
 use MyInvoice\Service\Ares\ViesClient;
 use PDO;
 use PDOStatement;
@@ -30,17 +31,22 @@ use Psr\Log\NullLogger;
  */
 final class ViesClientCzRoutingTest extends TestCase
 {
-    private function makeClient(): ViesClient
+    /**
+     * @param string|false $cachedPayload JSON, který vrátí každé fetchColumn()
+     *                                    (simuluje zásah cache), false = cache prázdná.
+     */
+    private function makeClient(string|false $cachedPayload = false): ViesClient
     {
         $config = new Config([
-            'vies' => ['rest_api' => '', 'wsdl' => '', 'cache_ttl' => 86400, 'timeout' => 8],
-            'ares' => ['api' => '', 'timeout' => 5],
+            'vies'   => ['rest_api' => '', 'wsdl' => '', 'cache_ttl' => 86400, 'timeout' => 8],
+            'ares'   => ['api' => '', 'timeout' => 5],
+            'crpdph' => ['endpoint' => '', 'cache_ttl' => 86400, 'timeout' => 8],
         ]);
 
-        // Connection s mockovaným PDO → fromCache nevrátí žádný řádek, cache() je no-op.
+        // Connection s mockovaným PDO → fromCache vrátí $cachedPayload, cache() je no-op.
         $stmt = $this->createStub(PDOStatement::class);
         $stmt->method('execute')->willReturn(true);
-        $stmt->method('fetchColumn')->willReturn(false);
+        $stmt->method('fetchColumn')->willReturn($cachedPayload);
         $pdo = $this->createStub(PDO::class);
         $pdo->method('prepare')->willReturn($stmt);
 
@@ -48,9 +54,10 @@ final class ViesClientCzRoutingTest extends TestCase
         $ref = new \ReflectionProperty(Connection::class, 'pdo');
         $ref->setValue($connection, $pdo);
 
-        $ares = new AresClient($config, $connection, new NullLogger());
+        $ares   = new AresClient($config, $connection, new NullLogger());
+        $crpdph = new CrpDphClient($config, $connection, new NullLogger());
 
-        return new ViesClient($config, $connection, new NullLogger(), $ares);
+        return new ViesClient($config, $connection, new NullLogger(), $ares, $crpdph);
     }
 
     public function testCzOsvcDicWithRodneCisloDoesNotHardNegateViaAres(): void
@@ -77,5 +84,34 @@ final class ViesClientCzRoutingTest extends TestCase
         $m = new \ReflectionMethod(ViesClient::class, 'tryAres');
         $result = $m->invoke($client, '123', 'CZ123');
         self::assertNull($result);
+    }
+
+    public function testCzGroupDicRoutesToCrpDphNotVies(): void
+    {
+        // Skupinová registrace DPH (kmen 699*): VIES ji neeviduje → routujeme na
+        // registr plátců DPH. Zásah crpdph_cache (found=true) musí dát valid=true
+        // se source 'crpdph'; kdyby routing spadl do vies_cache, vrátil by se
+        // source 'cache' (payload nemá klíč `valid`) → test by selhal.
+        $payload = '{"found":true,"unreliable":false,"accounts":[],"fu_code":"451","source":"fresh"}';
+        $r = $this->makeClient($payload)->lookup('CZ699000797');
+        self::assertSame('crpdph', $r['source']);
+        self::assertTrue($r['valid']);
+        self::assertTrue($r['group_registration'] ?? false);
+        // Registr plátců název ani adresu subjektu nevrací — kontrakt, na kterém
+        // stojí guardy ve frontendu (prázdný název se nesmí propsat do formuláře
+        // klienta ani do hlášky „DIČ je platné — <název>“).
+        self::assertSame('', $r['name'] ?? null);
+        self::assertSame('', $r['address'] ?? null);
+        self::assertArrayHasKey('parsed', $r);
+        self::assertNull($r['parsed']);
+    }
+
+    public function testCzGroupDicUnavailableRegistryIsSoftError(): void
+    {
+        // Registr plátců DPH nedostupný (offline: prázdný endpoint, prázdná cache)
+        // → source 'error' ("služba nedostupná"), NIKDY tvrdý negativ přes VIES/ARES.
+        $r = $this->makeClient()->lookup('CZ699000797');
+        self::assertSame('error', $r['source']);
+        self::assertFalse($r['valid']);
     }
 }

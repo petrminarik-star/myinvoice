@@ -18,7 +18,7 @@ const error = ref('')
 const fieldErrors = ref<Record<string, string[]>>({})
 
 const admin = ref({ name: '', email: '', password: '', password_confirm: '' })
-const requireTotp = ref(false)
+const requireMfa = ref(false)
 const skipSupplier = ref(false)
 const generateSample = ref(false)
 const sampleResult = ref<{
@@ -189,7 +189,8 @@ async function submit() {
         email: admin.value.email.trim(),
         password: admin.value.password,
       },
-      require_totp: requireTotp.value,
+      require_mfa: requireMfa.value,
+      require_totp: false,
     }
     if (!skipSupplier.value && supplier.value.company_name.trim()) {
       payload.supplier = {
@@ -224,7 +225,12 @@ async function submit() {
         }
       }
     }
-    await authApi.setup(payload)
+    const setupResult = await authApi.setup(payload)
+    auth.setSessionCsrfToken(setupResult.csrf_token)
+    // MFA politiku do storu ZÁMĚRNĚ nepřepisujeme z odpovědi setupu — ta nese
+    // to, co wizard poslal, ne to, co je reálně v configu. Jediný zdroj pravdy
+    // je /me (goToApp() dělá refresh + hard reload), jinak by /setup-mfa mohlo
+    // nabídnout metodu, kterou server odmítne.
 
     // Volitelně: vygenerovat sample data (jen pokud user zaškrtl + supplier vyplněn)
     if (generateSample.value && !skipSupplier.value) {
@@ -309,15 +315,18 @@ async function submit() {
             <div class="pt-2 border-t border-neutral-200">
               <label class="flex items-start gap-3 cursor-pointer">
                 <input
-                  v-model="requireTotp"
+                  v-model="requireMfa"
                   type="checkbox"
                   class="mt-1 h-4 w-4 rounded border-neutral-300 text-primary-600 focus:ring-primary-500"
                 />
                 <span class="text-sm">
-                  <span class="font-medium text-neutral-800">{{ t('setup.require_totp_label') }}</span>
-                  <span class="block text-xs text-neutral-500 mt-0.5">{{ t('setup.require_totp_hint') }}</span>
+                  <span class="font-medium text-neutral-800">{{ t('setup.require_mfa_label') }}</span>
+                  <span class="block text-xs text-neutral-500 mt-0.5">{{ t('setup.require_mfa_hint') }}</span>
                 </span>
               </label>
+              <p v-if="requireMfa" class="mt-2 ml-7 text-xs text-neutral-500">
+                {{ t('setup.require_mfa_methods_hint') }}
+              </p>
             </div>
 
             <button type="submit" :disabled="!adminValid" class="w-full h-10 bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 disabled:cursor-not-allowed text-white font-medium rounded-md transition">
@@ -492,10 +501,8 @@ async function submit() {
           <h2 class="text-xl font-semibold mb-2">{{ t('common.success') }}</h2>
           <p class="text-neutral-500 mb-2">{{ locale === 'cs' ? 'Admin účet byl vytvořen a jste přihlášen.' : 'Admin account created and you are signed in.' }}</p>
 
-          <div v-if="requireTotp" class="mb-6 inline-block bg-warning-50 border border-warning-500/40 rounded-md px-4 py-2 text-sm text-warning-600 text-left">
-            {{ locale === 'cs'
-              ? 'Vynucení 2FA je aktivní. Po pokračování budeš přesměrován na nastavení TOTP.'
-              : '2FA enforcement is active. You will be redirected to TOTP setup next.' }}
+          <div v-if="requireMfa" class="mb-6 inline-block bg-warning-50 border border-warning-500/40 rounded-md px-4 py-2 text-sm text-warning-600 text-left">
+            {{ t('setup.mfa_setup_next') }}
           </div>
 
           <div v-if="sampleResult" class="mb-6 inline-block bg-success-50 border border-success-500/40 rounded-md px-4 py-2 text-sm text-success-600 text-left">

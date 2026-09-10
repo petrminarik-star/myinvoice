@@ -7,16 +7,23 @@ namespace MyInvoice\Action\Auth;
 use MyInvoice\Http\Json;
 use MyInvoice\Infrastructure\Config\Config;
 use MyInvoice\Infrastructure\Database\Connection;
+use MyInvoice\Repository\PasskeyCredentialRepository;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\Auth\BruteForceGuard;
 use MyInvoice\Service\Auth\EmailOtpService;
+use MyInvoice\Service\Auth\LoginSessionIssuer;
+use MyInvoice\Service\Auth\MfaPolicyService;
+use MyInvoice\Service\Auth\PasskeyService;
 use MyInvoice\Service\Auth\PasswordHasher;
 use MyInvoice\Service\Auth\SecretEncryption;
-use MyInvoice\Service\Auth\SessionManager;
+use MyInvoice\Service\Auth\SessionAuthContext;
+use MyInvoice\Service\Auth\StoredPasskeyCredential;
 use MyInvoice\Service\Auth\TotpService;
 use MyInvoice\Service\Auth\TrustedDeviceService;
+use MyInvoice\Service\Auth\WebAuthnCeremonyStore;
 use MyInvoice\Service\Captcha\TurnstileVerifier;
 use MyInvoice\Service\IpMatcher;
+use Psr\Clock\ClockInterface;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
 
@@ -25,7 +32,6 @@ final class LoginAction
     public function __construct(
         private readonly Connection $db,
         private readonly PasswordHasher $hasher,
-        private readonly SessionManager $sessions,
         private readonly BruteForceGuard $bf,
         private readonly TurnstileVerifier $turnstile,
         private readonly ActivityLogger $logger,
@@ -35,7 +41,74 @@ final class LoginAction
         private readonly SecretEncryption $crypto,
         private readonly EmailOtpService $emailOtp,
         private readonly TrustedDeviceService $trustedDevices,
+        private readonly PasskeyCredentialRepository $credentials,
+        private readonly PasskeyService $passkeys,
+        private readonly WebAuthnCeremonyStore $ceremonies,
+        private readonly MfaPolicyService $mfaPolicy,
+        private readonly LoginSessionIssuer $loginIssuer,
+        private readonly ClockInterface $clock,
+        private readonly \MyInvoice\Service\Auth\MfaRecoveryCodeService $recoveryCodes,
     ) {}
+
+    public function passkeyOptions(Request $request, Response $response): Response
+    {
+        if (!(bool) $this->config->get('auth.passwordless_login.enabled', false)) {
+            return Json::error(
+                $response,
+                'passwordless_login_disabled',
+                'Přihlášení pouze pomocí passkey není v této instalaci povolené.',
+                403,
+            );
+        }
+        if (!$this->mfaPolicy->isMethodAllowed('passkey')) {
+            return Json::error(
+                $response,
+                'mfa_method_not_allowed',
+                'Přihlášení pomocí passkey není v této instalaci povolené.',
+                403,
+            );
+        }
+        if (!$this->passkeys->isAvailable()) {
+            return Json::error(
+                $response,
+                'passkeys_unavailable',
+                'Passkeys nejsou kvůli konfiguraci této instalace dostupné.',
+                503,
+            );
+        }
+
+        $body = (array) ($request->getParsedBody() ?? []);
+        $turnstileToken = isset($body['cf_turnstile_response'])
+            ? (string) $body['cf_turnstile_response']
+            : '';
+        $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
+        $userAgent = $request->getHeaderLine('User-Agent');
+        if (!$this->turnstile->verify($turnstileToken, $ip, 'login')) {
+            $this->logger->log('auth.captcha_failed', null, null, null, [
+                'ip' => $ip,
+                'login_method' => 'passkey',
+            ], $ip, $userAgent);
+            return Json::error($response, 'captcha_failed', 'CAPTCHA selhala.', 400);
+        }
+
+        $challenge = random_bytes(32);
+        $options = $this->passkeys->discoverableAssertionOptions($challenge);
+        $flowToken = $this->ceremonies->create(
+            WebAuthnCeremonyStore::PURPOSE_DISCOVERABLE_LOGIN,
+            null,
+            null,
+            null,
+            $challenge,
+            $options,
+            $ip,
+            $userAgent,
+        );
+
+        return Json::ok($response, [
+            'flow_token' => $flowToken,
+            'public_key' => $options,
+        ]);
+    }
 
     public function __invoke(Request $request, Response $response): Response
     {
@@ -43,6 +116,7 @@ final class LoginAction
         $email = trim((string) ($body['email'] ?? ''));
         $password = (string) ($body['password'] ?? '');
         $totpCode = isset($body['totp']) ? trim((string) $body['totp']) : '';
+        $recoveryCode = isset($body['recovery_code']) ? trim((string) $body['recovery_code']) : '';
         $emailOtpCode = isset($body['email_otp']) ? trim((string) $body['email_otp']) : '';
         $resendOtp = !empty($body['resend_otp']);
         $rememberDevice = !empty($body['remember_device']);
@@ -83,7 +157,13 @@ final class LoginAction
         }
 
         // Načti usera (vždy zavolej dummyVerify pokud user neexistuje → konstantní timing)
-        $stmt = $this->db->pdo()->prepare('SELECT id, email, name, role, locale, password_hash, is_active, totp_secret, totp_enabled FROM users WHERE email = ? LIMIT 1');
+        $stmt = $this->db->pdo()->prepare(
+            'SELECT id, email, name, role, locale, password_hash, is_active,
+                    totp_secret, totp_enabled, session_lock_after_minutes
+               FROM users
+              WHERE email = ?
+              LIMIT 1'
+        );
         $stmt->execute([$email]);
         $user = $stmt->fetch(\PDO::FETCH_ASSOC);
 
@@ -104,16 +184,126 @@ final class LoginAction
             return Json::error($response, 'invalid_credentials', 'Neplatné přihlašovací údaje.', 401);
         }
 
-        // Druhý faktor. Dvě vzájemně výlučné větve:
-        //   A) user má aktivní TOTP → vyžaduj TOTP kód (authenticator app)
-        //   B) user nemá TOTP → e-mailové OTP (povinné, pokud cfg.auth.email_otp.enabled)
-        //      přeskočí se na „důvěryhodném zařízení" (remember-device cookie).
-        $totpActive     = (int) $user['totp_enabled'] === 1 && !empty($user['totp_secret']);
+        $totpActive = (int) $user['totp_enabled'] === 1 && !empty($user['totp_secret']);
+        $totpAllowed = $this->mfaPolicy->isMethodAllowed('totp');
+
+        // Záložní kód se uplatní PŘED výběrem faktoru. Je to break-glass pro člověka,
+        // který zrovna žádný faktor po ruce nemá, takže nesmí být schovaný za výzvou
+        // k passkey ceremonii, kterou nedokončí, ani za TOTP, které ztratil.
+        // Neprochází `allowed_mfa_methods` — ten seznam říká, čím se plní povinné MFA,
+        // ne čím se lze zachránit; kdyby ho musel splnit, byl by k nepotřebě přesně
+        // v konfiguraci, která uživatele zamkla ven.
+        if ($recoveryCode !== '' && $this->recoveryCodes->hasUsable((int) $user['id'])) {
+            if ($this->bf->isTotpLocked((int) $user['id'])) {
+                return Json::error($response, 'too_many_attempts', 'Příliš mnoho pokusů. Zkus to později.', 429);
+            }
+            if (!$this->recoveryCodes->consume((int) $user['id'], $recoveryCode, $ip)) {
+                $this->bf->recordTotpFailure((int) $user['id']);
+                $this->bf->recordFailure($email, $ip);
+                $this->logger->log('auth.login_failed', (int) $user['id'], 'user', (int) $user['id'], [
+                    'email' => $email, 'reason' => 'recovery_code_invalid',
+                ], $ip, $userAgent);
+                return Json::error($response, 'invalid_recovery_code', 'Neplatný nebo už použitý záložní kód.', 401);
+            }
+            $this->bf->recordTotpSuccess((int) $user['id']);
+            $this->rehashPasswordIfNeeded($user, $password);
+            $remaining = $this->recoveryCodes->remaining((int) $user['id']);
+            $this->logger->log('auth.recovery_code_login', (int) $user['id'], 'user', (int) $user['id'], [
+                'email' => $email, 'remaining' => $remaining,
+            ], $ip, $userAgent);
+
+            // Session je STRONG schválně: uživatel se hlásí právě proto, aby si pořádek
+            // ve faktorech udělal, a `basic` session by ho při povinném MFA uvěznila
+            // v enrollmentu, kde ztracený klíč odebrat nejde. Jednorázovost kódu,
+            // zámek pokusů a auditní stopa jsou to, co tuhle výjimku drží v mezích.
+            return $this->loginIssuer->issue(
+                $response,
+                $user,
+                $ip,
+                $userAgent,
+                SessionAuthContext::strong('recovery', $this->clock->now()),
+            );
+        }
+        $passkeysUsable = $this->mfaPolicy->isMethodAllowed('passkey')
+            && $this->passkeys->isAvailable();
+        $storedPasskeys = $passkeysUsable
+            ? $this->credentials->findAllForUser((int) $user['id'])
+            : [];
+        if ($storedPasskeys !== []
+            && !($totpCode !== '' && $totpActive && $totpAllowed)
+        ) {
+            $this->rehashPasswordIfNeeded($user, $password);
+            $challenge = random_bytes(32);
+            $options = $this->passkeys->assertionOptions(
+                array_map(
+                    static fn (StoredPasskeyCredential $credential) => $credential->record,
+                    $storedPasskeys,
+                ),
+                $challenge,
+            );
+            $flowToken = $this->ceremonies->create(
+                WebAuthnCeremonyStore::PURPOSE_LOGIN,
+                (int) $user['id'],
+                null,
+                null,
+                $challenge,
+                $options,
+                $ip,
+                $userAgent,
+            );
+            $methods = ['passkey'];
+            if ($totpActive && $totpAllowed) {
+                $methods[] = 'totp';
+            }
+            // Bez tohohle by uživatel se ztraceným klíčem viděl jen výzvu k ceremonii,
+            // kterou nemá čím dokončit, a o existenci záložních kódů by se z UI nedozvěděl.
+            if ($this->recoveryCodes->hasUsable((int) $user['id'])) {
+                $methods[] = 'recovery';
+            }
+
+            return Json::error(
+                $response,
+                'mfa_required',
+                'Je vyžadováno ověření silným faktorem.',
+                401,
+                [
+                    'flow_token' => $flowToken,
+                    'methods' => $methods,
+                    'public_key' => $options,
+                ],
+            );
+        }
+
         // Default OFF — opt-in feature, ať to není breaking change pro existující
         // instalace (jinak by se uživatelům bez TOTP náhle vyžadoval e-mailový kód).
         $emailOtpOn     = (bool) $this->config->get('auth.email_otp.enabled', false);
         $issueTrustedTd = false;  // vystavit trusted-device cookie po úspěšném loginu?
+        $authContext = SessionAuthContext::basic('password');
 
+        // Uživatele s passkey nesmí prosté heslo pustit dovnitř jen proto, že se
+        // WebAuthn stal nedostupným (rozbité app.url) nebo že správce metodu
+        // zakázal. Připustíme jen jiný skutečný druhý faktor; countActive se díky
+        // short-circuitu ptá jen v této výjimečné konfiguraci.
+        if (!$passkeysUsable
+            && !$totpActive
+            && !$emailOtpOn
+            && $this->credentials->countActiveForUser((int) $user['id']) > 0
+        ) {
+            $this->rehashPasswordIfNeeded($user, $password);
+            $this->logger->log('auth.login_failed', (int) $user['id'], 'user', (int) $user['id'], [
+                'email' => $email, 'reason' => 'passkeys_unavailable',
+            ], $ip, $userAgent);
+            return Json::error(
+                $response,
+                'passkeys_unavailable',
+                'Passkeys nejsou kvůli konfiguraci této instalace dostupné.',
+                503,
+            );
+        }
+
+        // Faktor, který uživatel reálně má, se nikdy nepřeskakuje. `allowed_mfa_methods`
+        // řídí jen to, co splní povinné MFA (assurance), ne jestli se na faktor zeptáme —
+        // jinak by zúžení seznamu na ['passkey'] tiše zrušilo TOTP všem, kdo passkey nemají.
         if ($totpActive) {
             if ($totpCode === '') {
                 // Nepočítej jako fail — uživatel zadal heslo OK, jen čekáme na 2FA
@@ -136,6 +326,9 @@ final class LoginAction
                 return Json::error($response, 'invalid_totp', 'Neplatný TOTP kód.', 401);
             }
             $this->bf->recordTotpSuccess((int) $user['id']);
+            $authContext = $totpAllowed
+                ? SessionAuthContext::strong('totp', $this->clock->now())
+                : SessionAuthContext::basic('totp');
         } elseif ($emailOtpOn) {
             $tdCookieName = $this->trustedDevices->cookieName();
             $tdToken = $request->getCookieParams()[$tdCookieName] ?? null;
@@ -171,77 +364,40 @@ final class LoginAction
                 }
                 $this->bf->recordEmailOtpSuccess((int) $user['id']);
                 $issueTrustedTd = $rememberDevice;
+                $authContext = SessionAuthContext::basic('email_otp');
+            } else {
+                $authContext = SessionAuthContext::basic('trusted_device');
             }
         }
 
-        // Rehash pokud zastaral cost
-        if ($this->hasher->needsRehash((string) $user['password_hash'])) {
-            $newHash = $this->hasher->hash($password);
-            $this->db->pdo()->prepare('UPDATE users SET password_hash = ? WHERE id = ?')
-                ->execute([$newHash, (int) $user['id']]);
+        if ($this->mfaPolicy->isRequired()
+            && $authContext->assuranceLevel !== 'strong'
+        ) {
+            $authContext = SessionAuthContext::setup($authContext->authMethod);
         }
 
-        $this->bf->recordSuccess($email, $ip);
-
-        // Vytvoř session
-        $session = $this->sessions->create((int) $user['id'], $ip, $userAgent);
-
-        // Update last_login_at + last_login_ip + last_login_ua
-        $this->db->pdo()->prepare('UPDATE users SET last_login_at = NOW(), last_login_ip = ?, last_login_ua = ? WHERE id = ?')
-            ->execute([@inet_pton($ip) ?: null, substr($userAgent, 0, 255), (int) $user['id']]);
-
-        $this->logger->log('auth.login', (int) $user['id'], 'user', (int) $user['id'], [
-            'email' => $email,
-        ], $ip, $userAgent);
-
-        // Session cookie
-        $cookieName    = (string) $this->config->get('session.cookie_name', '__Host-myinvoice_session');
-        $cookieSecure  = (bool) $this->config->get('session.cookie_secure', true);
-        $cookieSameSite = (string) $this->config->get('session.cookie_samesite', 'Lax');
-        $maxAge = max(0, $session['expires_at'] - time());
-
-        $cookie = sprintf(
-            '%s=%s; HttpOnly; Path=/; Max-Age=%d; SameSite=%s%s',
-            $cookieName,
-            $session['token'],
-            $maxAge,
-            $cookieSameSite,
-            $cookieSecure ? '; Secure' : '',
+        $this->rehashPasswordIfNeeded($user, $password);
+        return $this->loginIssuer->issue(
+            $response,
+            $user,
+            $ip,
+            $userAgent,
+            $authContext,
+            $issueTrustedTd,
         );
+    }
 
-        $totpEnabled   = (int) $user['totp_enabled'] === 1;
-        $requireTotp   = (bool) $this->config->get('auth.require_totp', false);
-        $mustSetupTotp = $requireTotp && !$totpEnabled;
-
-        $result = Json::ok($response, [
-            'user' => [
-                'id'              => (int) $user['id'],
-                'email'           => $user['email'],
-                'name'            => $user['name'],
-                'role'            => $user['role'],
-                'locale'          => $user['locale'],
-                'totp_enabled'    => $totpEnabled,
-                'must_setup_totp' => $mustSetupTotp,
-            ],
-            'csrf_token' => $session['csrf_token'],
-        ])->withHeader('Set-Cookie', $cookie);
-
-        // „Zapamatovat zařízení" — vystav trusted-device cookie, ať se příště
-        // email OTP nevyžaduje (platí jen pro email-OTP fallback, ne pro TOTP).
-        if ($issueTrustedTd) {
-            $tdToken = $this->trustedDevices->issue((int) $user['id'], $ip, $userAgent);
-            $tdCookie = sprintf(
-                '%s=%s; HttpOnly; Path=/; Max-Age=%d; SameSite=%s%s',
-                $this->trustedDevices->cookieName(),
-                $tdToken,
-                $this->trustedDevices->days() * 86400,
-                $cookieSameSite,
-                $cookieSecure ? '; Secure' : '',
-            );
-            $result = $result->withAddedHeader('Set-Cookie', $tdCookie);
+    /**
+     * @param array<string,mixed> $user
+     */
+    private function rehashPasswordIfNeeded(array $user, string $password): void
+    {
+        if (!$this->hasher->needsRehash((string) $user['password_hash'])) {
+            return;
         }
-
-        return $result;
+        $newHash = $this->hasher->hash($password);
+        $this->db->pdo()->prepare('UPDATE users SET password_hash = ? WHERE id = ?')
+            ->execute([$newHash, (int) $user['id']]);
     }
 
     /** r***@hulan.cz — náznak adresy pro UI, bez prozrazení celého e-mailu. */

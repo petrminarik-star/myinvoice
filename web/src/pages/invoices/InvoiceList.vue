@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { overdueDays } from '@/utils/date'
 import { ref, computed, onMounted, watch } from 'vue'
 import DateInput from '@/components/ui/DateInput.vue'
 import { useRouter, useRoute, RouterLink } from 'vue-router'
@@ -216,8 +217,6 @@ const markPayableSelected = computed(() => {
 // po splatnosti a placené bankovním převodem (kartové/hotovostní úhrady se neupomínají).
 const reminderSelected = computed(() => {
   const ids = new Set(selectedIds.value)
-  const today = new Date()
-  today.setHours(0, 0, 0, 0)
   return groups.value
     .flatMap(g => g.invoices)
     .filter(inv => {
@@ -226,8 +225,7 @@ const reminderSelected = computed(() => {
       if (!['issued', 'sent', 'reminded'].includes(inv.status)) return false
       if (!hasPositiveAmountToPay(inv)) return false
       if ((inv.payment_method ?? 'bank_transfer') !== 'bank_transfer') return false
-      const due = new Date(inv.due_date)
-      return due < today
+      return overdueDays(inv.due_date) > 0
     })
 })
 

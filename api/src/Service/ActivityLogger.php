@@ -16,10 +16,14 @@ final class ActivityLogger
         'password', 'password_confirm', 'current_password', 'new_password',
         'token', 'csrf_token', 'cf_turnstile_response', 'secret_key',
         'private_key', 'pass',
+        'flow_token', 'step_up_token', 'challenge', 'credential', 'rawid',
+        'raw_id', 'signature', 'authenticator_data', 'client_data_json',
+        'attestation_object', 'public_key',
     ];
 
     public function __construct(private readonly Connection $db) {}
 
+    /** @param array<array-key,mixed>|null $payload */
     public function log(
         string $action,
         ?int $userId = null,
@@ -69,6 +73,10 @@ final class ActivityLogger
         return $sid !== false && $sid !== null ? (int) $sid : null;
     }
 
+    /**
+     * @param array<array-key,mixed> $data
+     * @return array<array-key,mixed>
+     */
     public function redact(array $data): array
     {
         $out = [];

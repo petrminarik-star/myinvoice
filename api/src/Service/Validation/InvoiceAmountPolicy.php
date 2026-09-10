@@ -6,6 +6,17 @@ namespace MyInvoice\Service\Validation;
 
 use MyInvoice\Service\Invoice\InvoiceMath;
 
+/**
+ * Pravidla pro znaménka a nulové částky na VYDANÝCH dokladech.
+ *
+ * Pozn. k dobropisům (vědomé rozhodnutí, ne opomenutí): u `credit_note` se
+ * kontrola kladné částky jen VYPÍNÁ — záporný součet se nikde nevynucuje.
+ * Záporná znaménka na dobropisu tedy stojí na konvenci CancelInvoiceAction
+ * (položky se zápornou qty) a na zákazu dvojí negace ve validateItem, ne na
+ * tvrdé validaci. VatLedgerService::fetchSales proto znaménko prodejní strany
+ * přebírá beze změny — na rozdíl od přijatých dobropisů, kde v datech reálně
+ * žijí obě konvence a evidence je normalizuje přes -ABS().
+ */
 final class InvoiceAmountPolicy
 {
     public const NON_POSITIVE_DRAFT_MESSAGE = 'Výsledná částka k úhradě musí být větší než 0. Pro čistě záporný nebo nulový doklad použij dobropis.';

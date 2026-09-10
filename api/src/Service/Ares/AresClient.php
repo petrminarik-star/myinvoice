@@ -123,8 +123,11 @@ final class AresClient
                 ? ((string) $cisloOr . (string) ($sidlo['cisloOrientacniPismeno'] ?? ''))
                 : '',
             // Převažující CZ-NACE NELZE z agregovaného seznamu ARES spolehlivě určit
-            // (nemá příznak hlavní činnosti). Vyplníme jen když je jednoznačná (1 reálný kód).
+            // (nemá příznak hlavní činnosti). Bereme NEJDELŠÍ kód (BUG 7) — kratší
+            // položky jsou zpravidla jen sekce/oddíly téže činnosti; oddíl (<4 číslice)
+            // nestačí (EPO chyba 30) → prázdno + poznámka cz_nace_note pro UI.
             'cz_nace_code' => self::primaryNace($raw),
+            'cz_nace_note' => self::naceNote($raw),
             // Typ poplatníka odvozený z právní formy: OSVČ → 'fo' (DPFO), firma → 'po' (DPPO).
             'taxpayer_type' => self::taxpayerTypeFromLegalForm((string) ($raw['pravniForma'] ?? '')),
             // Zápis v OR pro PO (např. „Spisová značka C 45039 vedená u Krajského
@@ -148,11 +151,40 @@ final class AresClient
     }
 
     /**
-     * Jednoznačná převažující CZ-NACE z `czNace` — jen pokud po odfiltrování
-     * placeholderů (kód „00"/samé nuly) zbyde právě jeden kód. Jinak '' (raději
-     * nevyplnit, než dosadit špatnou převažující činnost do přiznání).
+     * CZ-NACE prefill z `czNace` (BUG 7): vybere NEJDELŠÍ kód (po zahození
+     * placeholderů „00"/samé nuly) — kratší položky bývají jen sekce/oddíl téže
+     * činnosti. Je-li i nejdelší kód kratší než 4 číslice (jen oddíl, např. „74"),
+     * vrací '' — takový kód číselník MFČR pro c_okec nezná (EPO propustná chyba 30)
+     * a uživatel musí doplnit konkrétní třídu ručně (viz naceNote()).
+     * Výsledek se kanonizuje proti snapshotu číselníku ČINNOSTI (EpoOkecCodebook):
+     * zápis dle ČSÚ se dohledá doplněním nul zprava (7311 → 731100), kanonické
+     * hodnoty číselníku projdou beze změny.
      */
     private static function primaryNace(array $raw): string
+    {
+        $longest = self::longestNace($raw);
+        if ($longest === '' || strlen(preg_replace('/\D/', '', $longest) ?? '') < 4) {
+            return '';
+        }
+        return (string) (\MyInvoice\Service\Report\EpoSupplierBlockBuilder::normalizeCzNaceInput($longest) ?? '');
+    }
+
+    /**
+     * Poznámka pro UI, když ARES eviduje jen oddíl NACE (<4 číslice) — prefill
+     * zůstává prázdný a uživatel má doplnit třídu ručně. Jinak ''.
+     */
+    private static function naceNote(array $raw): string
+    {
+        $longest = self::longestNace($raw);
+        $digits = preg_replace('/\D/', '', $longest) ?? '';
+        if ($longest === '' || strlen($digits) >= 4) {
+            return '';
+        }
+        return "ARES u tohoto subjektu eviduje jen oddíl NACE {$longest}. Doplň prosím konkrétní třídu ručně.";
+    }
+
+    /** Nejdelší reálný kód z czNace (bez „00"/prázdných); '' když žádný. */
+    private static function longestNace(array $raw): string
     {
         $list = $raw['czNace'] ?? null;
         if (!is_array($list)) {
@@ -161,17 +193,17 @@ final class AresClient
         // POZN.: kódy sbíráme do listu hodnot, NE jako klíče pole — PHP by numerický
         // string klíč („620") přetypoval na int a funkce by vrátila int místo string
         // (TypeError → pád celého normalize, regrese pro subjekty s jedinou NACE, #76b).
-        $codes = [];
+        $longest = '';
         foreach ($list as $c) {
             $c = trim((string) $c);
             if ($c === '' || (int) $c === 0) {
                 continue; // přeskoč „00" / prázdné
             }
-            if (!in_array($c, $codes, true)) {
-                $codes[] = $c;
+            if (strlen($c) > strlen($longest)) {
+                $longest = $c;
             }
         }
-        return count($codes) === 1 ? $codes[0] : '';
+        return $longest;
     }
 
     /**

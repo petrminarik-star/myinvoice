@@ -88,6 +88,8 @@ const supplierDueLabel = computed(() => {
 
 const form = ref<ClientPayload>({
   company_name: '',
+  first_name: null,
+  last_name: null,
   ic: null,
   dic: null,
   tax_number: null,
@@ -484,7 +486,16 @@ async function submit() {
             </div>
           </div>
           <div v-if="viesResult" class="mt-2 text-xs">
-            <span v-if="viesResult.valid" class="text-primary-700">✓ {{ t('client.dic_valid', { dic: t('client.dic'), name: viesResult.name }) }}</span>
+            <!-- Registr plátců DPH (skupinová registrace CZ699…) ověří platnost, ale
+                 název subjektu nevrací — bez tohohle rozlišení by hláška končila
+                 visící pomlčkou („DIČ je platné — "). -->
+            <span v-if="viesResult.valid && viesResult.name" class="text-primary-700">✓ {{ t('client.dic_valid', { dic: t('client.dic'), name: viesResult.name }) }}</span>
+            <span v-else-if="viesResult.valid && viesResult.group_registration" class="text-primary-700">✓ {{ t('client.dic_valid_group', { dic: t('client.dic') }) }}</span>
+            <span v-else-if="viesResult.valid" class="text-primary-700">✓ {{ t('client.dic_valid_no_name', { dic: t('client.dic') }) }}</span>
+            <!-- Nedostupný registr/VIES je soft error (ViesClient vrací valid:false,
+                 source:'error') — hlásit ho jako „DIČ není platné" by byl falešný
+                 negativ, uživatel by opravoval správně zadané DIČ. -->
+            <span v-else-if="viesResult.source === 'error'" class="text-warning-700">{{ t('client.dic_check_unavailable') }}</span>
             <span v-else class="text-danger-500">✗ {{ t('client.dic_invalid', { dic: t('client.dic') }) }}</span>
           </div>
 
@@ -552,6 +563,21 @@ async function submit() {
           <input autocomplete="off" v-model="form.company_name" required
             class="w-full h-10 px-3 border border-neutral-300 rounded-md focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
           <p v-if="errors.company_name" class="text-xs text-danger-500 mt-1">{{ errors.company_name[0] }}</p>
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div>
+            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('client.first_name') }}</label>
+            <input autocomplete="off" v-model="form.first_name" maxlength="60"
+              class="w-full h-10 px-3 border border-neutral-300 rounded-md focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
+            <p v-if="errors.first_name" class="text-xs text-danger-500 mt-1">{{ errors.first_name[0] }}</p>
+          </div>
+          <div>
+            <label class="block text-sm font-medium text-neutral-700 mb-1">{{ t('client.last_name') }}</label>
+            <input autocomplete="off" v-model="form.last_name" maxlength="60"
+              class="w-full h-10 px-3 border border-neutral-300 rounded-md focus:ring-2 focus:ring-primary-500/20 focus:border-primary-500 outline-none" />
+            <p v-if="errors.last_name" class="text-xs text-danger-500 mt-1">{{ errors.last_name[0] }}</p>
+          </div>
         </div>
 
         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">

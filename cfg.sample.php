@@ -43,7 +43,7 @@ return [
         'backup_skip_routines' => false,             // true = vynechat stored procedures/functions ze zálohy. Dej true pokud DB user nemá privilege a nechceš grantovat (např. shared hosting). Default false = včetně procedur; při permission erroru auto-fallback s warningem.
     ],
     'redis' => [
-        'enabled' => false,                           // false = fallback na DB sessions a in-memory cache
+        'enabled' => false,                           // distribuovaný cache, rate limiting a brute-force ochrana
         'host'    => '127.0.0.1',
         'port'    => 6379,
         'auth'    => null,                           // heslo nebo null
@@ -51,13 +51,37 @@ return [
         'prefix'  => 'myinvoice:dev:',               // namespace všech klíčů — změň na 'myinvoice:prod:' v produkci
     ],
     'session' => [
-        'driver'        => 'auto',                   // 'auto' = Redis pokud běží, jinak DB | 'redis' | 'db'
         'lifetime_days' => 30,                       // platnost cookie i serverové session
+        // Výchozí interval a maximum osobní volby; 0 nic nevynucuje, uživatel si může
+        // nastavit 1–1440 min. POZOR: odemknout zamčenou session jde POUZE passkey —
+        // vlastní interval server bez aktivní passkey odmítne a při kladné hodnotě zde
+        // se uživatelům bez passkey (typicky instalace s e-mailovým OTP) ukáže health
+        // warning `session_lock_without_unlock_method`; jejich jediná cesta ven je logout.
+        'lock_after_minutes' => 0,
         'cookie_name'   => '__Host-myinvoice_session', // __Host- prefix → vyžaduje Secure + Path=/ + bez Domain (přísnější CSRF). Pro HTTP dev změnit na 'myinvoice_session' a cookie_secure=false.
         'cookie_secure' => true,                     // true vyžaduje HTTPS — false jen pro lokální HTTP dev (a __Host- nebude fungovat)
         'cookie_samesite' => 'Lax',                  // 'Lax' | 'Strict' | 'None' (None vyžaduje secure=true)
     ],
     'auth' => [
+        // null = zachovat legacy auth.require_totp; true/false = explicitní obecná MFA politika.
+        'require_mfa' => null,
+
+        // Které metody SPLNÍ povinné MFA. Podporované hodnoty jsou pouze 'passkey'
+        // a 'totp' — e-mailové OTP se sem NEPÍŠE, zapíná se níž přes email_otp.enabled
+        // a povinné MFA nesplňuje. Neznámá hodnota nezhavaruje boot: použije se
+        // výchozí seznam a v health se objeví warning `mfa_methods_configuration`.
+        //
+        // Zúžení seznamu neruší faktor, který uživatel už má — kdo má TOTP, bude
+        // se na něj i nadále ptát; jen mu takové ověření nebude stačit jako „strong"
+        // a systém ho pošle zaregistrovat povolenou metodu.
+        'allowed_mfa_methods' => ['passkey', 'totp'],
+
+        // Opt-in přihlášení discoverable passkey bez zadání e-mailu a hesla.
+        // Vyžaduje povolenou passkey metodu a správně nastavený HTTPS WebAuthn origin.
+        'passwordless_login' => [
+            'enabled' => false,
+        ],
+
         // true = vynutit TOTP (2FA) pro VŠECHNY uživatele. Po loginu, pokud uživatel
         // ještě nemá totp_enabled=1, je zamčen na stránce /setup-totp dokud 2FA
         // neaktivuje. Single escape route je odhlášení. Doporučeno pro produkci
@@ -204,7 +228,7 @@ return [
         'invoices_dir' => __DIR__ . '/storage/invoices',  // vygenerovaná PDF
         'uploads_dir'  => __DIR__ . '/storage/uploads',   // dočasné upload soubory (GPC výpisy, attachementy)
         'backup_dir'   => __DIR__ . '/storage/backup',    // mysqldump zálohy z cron-backup.php
-        'sessions_dir' => __DIR__ . '/storage/sessions',  // jen pokud session.driver = 'db' (file fallback)
+        'sessions_dir' => __DIR__ . '/storage/sessions',  // rezervovaný runtime adresář (browser session jsou v MariaDB)
         'cache_dir'    => __DIR__ . '/storage/cache',     // file cache (ARES/VIES odpovědi, PDF mezikroky)
     ],
     'pdf_signing' => [
@@ -228,6 +252,11 @@ return [
     ],
     'qr' => [
         'czk_constant_symbol' => '0308',             // KS pro CZK platby (0308 = běžný platební styk)
+    ],
+    'invoices' => [
+        // true = v seznamech a souhrnech zahrnout mezi doklady po splatnosti i dnešní.
+        // Odeslání upomínky zůstává možné až po dni splatnosti.
+        'overdue_includes_today' => false,
     ],
     'pagination' => [
         // Velikost stránky pro tlačítko "Další" v UI seznamech.

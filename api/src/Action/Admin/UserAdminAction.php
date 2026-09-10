@@ -9,6 +9,7 @@ use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\Auth\PasswordHasher;
+use MyInvoice\Service\Auth\SessionManager;
 use MyInvoice\Service\IpMatcher;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
@@ -29,15 +30,20 @@ final class UserAdminAction
         private readonly ActivityLogger $logger,
         private readonly IpMatcher $ipMatcher,
         private readonly PasswordHasher $hasher,
+        private readonly SessionManager $sessions,
     ) {}
 
     public function list(Request $request, Response $response): Response
     {
-        if (!$this->guard($request, $response, $err)) return $err;
-        $rows = $this->db->pdo()->query(
+        if (($error = $this->guard($request, $response)) !== null) return $error;
+        $statement = $this->db->pdo()->query(
             'SELECT id, email, name, role, locale, is_active, created_at, last_login_at
                FROM users ORDER BY id ASC'
-        )->fetchAll(\PDO::FETCH_ASSOC);
+        );
+        if ($statement === false) {
+            throw new \RuntimeException('Seznam uživatelů se nepodařilo načíst.');
+        }
+        $rows = $statement->fetchAll(\PDO::FETCH_ASSOC);
         foreach ($rows as &$r) {
             $r['id'] = (int) $r['id'];
             $r['is_active'] = (bool) $r['is_active'];
@@ -47,7 +53,7 @@ final class UserAdminAction
 
     public function create(Request $request, Response $response): Response
     {
-        if (!$this->guard($request, $response, $err)) return $err;
+        if (($error = $this->guard($request, $response)) !== null) return $error;
         $body = (array) ($request->getParsedBody() ?? []);
         $email = trim((string) ($body['email'] ?? ''));
         $name  = trim((string) ($body['name'] ?? ''));
@@ -83,9 +89,12 @@ final class UserAdminAction
         return Json::ok($response, $this->fetchUser($id), 201);
     }
 
+    /**
+     * @param array<string,string> $args
+     */
     public function update(Request $request, Response $response, array $args): Response
     {
-        if (!$this->guard($request, $response, $err)) return $err;
+        if (($error = $this->guard($request, $response)) !== null) return $error;
         $id = (int) ($args['id'] ?? 0);
         $row = $this->fetchUser($id);
         if (!$row) return Json::error($response, 'not_found', 'Uživatel nenalezen.', 404);
@@ -137,13 +146,21 @@ final class UserAdminAction
         $params[] = $id;
         $sql = 'UPDATE users SET ' . implode(', ', $sets) . ' WHERE id = ?';
         $this->db->pdo()->prepare($sql)->execute($params);
+        $mustRevokeSessions = !empty($body['password'])
+            || (array_key_exists('is_active', $body) && !(bool) $body['is_active']);
+        if ($mustRevokeSessions) {
+            $this->sessions->destroyAllForUser($id);
+        }
         $this->log($request, 'user.updated', $id, ['fields' => array_keys($body)]);
         return Json::ok($response, $this->fetchUser($id));
     }
 
+    /**
+     * @param array<string,string> $args
+     */
     public function delete(Request $request, Response $response, array $args): Response
     {
-        if (!$this->guard($request, $response, $err)) return $err;
+        if (($error = $this->guard($request, $response)) !== null) return $error;
         $id = (int) ($args['id'] ?? 0);
         $row = $this->fetchUser($id);
         if (!$row) return Json::error($response, 'not_found', 'Uživatel nenalezen.', 404);
@@ -159,28 +176,34 @@ final class UserAdminAction
 
         $stmt = $this->db->pdo()->prepare('UPDATE users SET is_active = 0 WHERE id = ?');
         $stmt->execute([$id]);
+        $this->sessions->destroyAllForUser($id);
         $this->log($request, 'user.deactivated', $id, []);
         return Json::ok($response, ['deactivated' => true]);
     }
 
     private function countActiveAdmins(): int
     {
-        return (int) $this->db->pdo()->query(
+        $statement = $this->db->pdo()->query(
             "SELECT COUNT(*) FROM users WHERE role = 'admin' AND is_active = 1"
-        )->fetchColumn();
+        );
+        if ($statement === false) {
+            throw new \RuntimeException('Počet administrátorů se nepodařilo načíst.');
+        }
+        return (int) $statement->fetchColumn();
     }
 
-    private function guard(Request $request, Response $response, ?Response &$err): bool
+    private function guard(Request $request, Response $response): ?Response
     {
         $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);
         if (($user['role'] ?? '') !== 'admin') {
-            $err = Json::error($response, 'forbidden', 'Pouze admin.', 403);
-            return false;
+            return Json::error($response, 'forbidden', 'Pouze admin.', 403);
         }
-        $err = null;
-        return true;
+        return null;
     }
 
+    /**
+     * @return array<string,mixed>|null
+     */
     private function fetchUser(int $id): ?array
     {
         $stmt = $this->db->pdo()->prepare(
@@ -195,6 +218,9 @@ final class UserAdminAction
         return $r;
     }
 
+    /**
+     * @param array<string,mixed> $payload
+     */
     private function log(Request $request, string $action, int $entityId, array $payload): void
     {
         $user = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);

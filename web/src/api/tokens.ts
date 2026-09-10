@@ -23,6 +23,7 @@ export interface CreateTokenPayload {
   scope: 'read' | 'read_write'
   expires_at?: string | null
   totp_code?: string
+  step_up_token?: string
 }
 
 export interface CreateTokenResult {

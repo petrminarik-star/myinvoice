@@ -40,11 +40,19 @@ api.interceptors.response.use(
     const status = error.response?.status
     const code = error.response?.data?.error?.code
 
-    if (status === 401) {
+    if (status === 401 && [
+      'unauthenticated',
+      'session_expired',
+      'invalid_token',
+      'mfa_reauthentication_required',
+    ].includes(code)) {
       const path = window.location.pathname
       if (!path.startsWith('/login') && !path.startsWith('/setup')) {
         window.location.href = '/login'
       }
+    }
+    if (status === 423 && code === 'session_locked') {
+      window.dispatchEvent(new CustomEvent('myinvoice:session-locked'))
     }
     if (status === 423 && code === 'setup_required') {
       window.location.href = '/setup'
@@ -56,8 +64,25 @@ api.interceptors.response.use(
     // /login NEVYJÍMÁME — když máš stale session a otevřeš /login, redirect
     // na /setup-totp je správný.
     if (status === 403 && code === 'totp_setup_required') {
-      if (window.location.pathname !== '/setup-totp') {
-        window.location.href = '/setup-totp'
+      if (window.location.pathname !== '/setup-mfa') {
+        window.location.href = '/setup-mfa?method=totp'
+      }
+    }
+    if (status === 403 && code === 'mfa_setup_required') {
+      if (window.location.pathname !== '/setup-mfa') {
+        window.location.href = '/setup-mfa'
+      }
+    }
+
+    // 403 forbidden_supplier = v localStorage je stale firma, ke které uživatel
+    // ztratil přístup (admin mu ji odebral z přiřazených). Bez zásahu by selhal
+    // i /auth/me (interceptor hlavičku posílá vždy) a uživatel by se do aplikace
+    // vůbec nedostal. Smaž stale výběr a reloadni — server bez hlavičky fallbackne
+    // na první přiřazenou firmu. Reload jen když klíč existoval → žádná smyčka.
+    if (status === 403 && code === 'forbidden_supplier') {
+      if (localStorage.getItem('myinvoice.current_supplier_id') !== null) {
+        localStorage.removeItem('myinvoice.current_supplier_id')
+        window.location.reload()
       }
     }
 
@@ -109,10 +134,11 @@ export interface HealthResponse {
   version: string
   db: boolean
   redis: boolean
-  warnings: Array<{ code: string; message: string }>
+  warnings?: Array<{ code: string; message: string }>
   time: string
 }
 
 export const systemApi = {
-  health: () => api.get<HealthResponse>('/health').then((r) => r.data),
+  health: (signal?: AbortSignal) =>
+    api.get<HealthResponse>('/health', { signal }).then((r) => r.data),
 }

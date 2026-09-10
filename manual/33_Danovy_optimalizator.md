@@ -17,7 +17,7 @@ metoda, přepočet na CZK).
 
 Pro minulý rok porovná dva režimy a vybere levnější:
 
-- **Paušální daň** — jedna měsíční částka dle pásma (sloučí daň i pojistné).
+- **Paušální daň** — měsíční záloha dle pásma (sloučí daň i pojistné).
 - **Standardní režim** — výdajový paušál (40/60/80 %) **nebo skutečné výdaje**,
   základ daně dle §7, progresivní daň 15 / 23 %, slevy (poplatník, manžel/ka,
   děti vč. daňového bonusu) a sociální + zdravotní pojistné.
@@ -25,6 +25,19 @@ Pro minulý rok porovná dva režimy a vybere levnější:
 Rozpad ukáže cestu **příjem → výdaje → základ → daň → pojistné → odvody celkem →
 čistý příjem** a **efektivní sazbu odvodů**. Pokud byl loni příjem, přidá i
 **meziroční (YoY) srovnání** čistého příjmu.
+
+### Změna měsíční zálohy uprostřed roku
+
+Záloha paušální daně se může změnit i během roku (2026 klesá 1. pásmo od
+1. července z 9 984 na 9 162 Kč). Karta paušálu proto ukazuje **zálohu po
+obdobích**, ne průměr, a roční částka je jejich součtem (2026 v 1. pásmu
+114 876 Kč). Při snížení sazby navíc přibude upozornění s **přeplatkem** za
+měsíce zaplacené vyšší zálohou a s částkou, na kterou lze **snížit nejbližší
+zálohu** — alternativou je požádat si o vrácení až po skončení roku.
+
+Rozvrh záloh je editovatelný v `Nastavení → Číselníky → Daňové konstanty`
+(sekce *Paušální daň*): tlačítkem **přidat změnu sazby** vznikne další období od
+zvoleného měsíce. Roční částka se z rozvrhu dopočítá, needituje se.
 
 ## Běžící rok (predikce)
 

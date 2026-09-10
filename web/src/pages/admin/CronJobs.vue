@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed } from 'vue'
+import { ref, computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { adminApi, type CronJob, type CronJobHealth } from '@/api/admin'
 import { useToast } from '@/composables/useToast'
+import { useSessionAwarePolling } from '@/composables/useSessionAwarePolling'
 
 const { t } = useI18n()
 const toast = useToast()
@@ -13,10 +14,10 @@ const loading = ref(false)
 const expanded = ref<Record<string, boolean>>({})
 const running = ref<Record<string, boolean>>({})
 
-async function load() {
+async function load(signal?: AbortSignal) {
   loading.value = true
   try {
-    const r = await adminApi.cronJobs()
+    const r = await adminApi.cronJobs(signal)
     jobs.value = r.jobs
     serverTime.value = r.server_time
   } finally {
@@ -24,14 +25,7 @@ async function load() {
   }
 }
 
-let refreshTimer: ReturnType<typeof setInterval> | undefined
-onMounted(async () => {
-  await load()
-  refreshTimer = setInterval(load, 60_000)
-})
-onUnmounted(() => {
-  if (refreshTimer) clearInterval(refreshTimer)
-})
+const polling = useSessionAwarePolling(signal => load(signal), 60_000)
 
 function toggle(script: string) {
   expanded.value[script] = !expanded.value[script]
@@ -45,9 +39,9 @@ async function runNow(script: string) {
     await adminApi.runCronJob(script)
     toast.success(t('cron_jobs.run_now_started', { script }))
     // Refresh hned a pak ještě několikrát, aby se chytl finish běhu.
-    setTimeout(() => { load() }, 1500)
-    setTimeout(() => { load() }, 5000)
-    setTimeout(() => { load() }, 15000)
+    setTimeout(() => { if (polling.active.value) void load() }, 1500)
+    setTimeout(() => { if (polling.active.value) void load() }, 5000)
+    setTimeout(() => { if (polling.active.value) void load() }, 15000)
   } catch (e: any) {
     toast.error(e?.response?.data?.error?.message || t('cron_jobs.run_now_failed', { script }))
   } finally {

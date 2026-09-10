@@ -236,7 +236,8 @@ export const documentsApi = {
   uploadFinish: (jobId: number) =>
     api.post<{ job_id: number }>('/documents/upload/finish', { job_id: jobId }).then(r => r.data),
 
-  jobs: () => api.get<{ jobs: DocJob[] }>('/documents/jobs').then(r => r.data.jobs),
+  jobs: (signal?: AbortSignal) =>
+    api.get<{ jobs: DocJob[] }>('/documents/jobs', { signal }).then(r => r.data.jobs),
   job: (id: number) => api.get<DocJob>(`/documents/jobs/${id}`).then(r => r.data),
   cancelJob: (id: number) => api.post<{ ok: boolean }>(`/documents/jobs/${id}/cancel`).then(r => r.data),
   deleteJob: (id: number) => api.delete<{ ok: boolean }>(`/documents/jobs/${id}`).then(r => r.data),

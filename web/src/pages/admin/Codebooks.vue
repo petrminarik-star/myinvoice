@@ -15,6 +15,7 @@ import { useSupplierStore } from '@/stores/supplier'
 import { useAuthStore } from '@/stores/auth'
 import { useHotkey } from '@/composables/useHotkey'
 import { useToast } from '@/composables/useToast'
+import { formatMonth } from '@/composables/useFormat'
 
 const { t } = useI18n()
 const route = useRoute()
@@ -577,6 +578,72 @@ function selectTaxYear(year: number) {
   taxIsOverride.value = row.is_override
   taxIsNew.value = false
   taxModel.value = JSON.parse(JSON.stringify(row.data)) // hluboká kopie pro editaci
+  normalizePausalMonthly(year)
+}
+
+/**
+ * Paušální daň se edituje po MĚSÍČNÍCH zálohách — sazba se může změnit uprostřed
+ * roku (2026: 1. pásmo 9 984 → 9 162 Kč od 1. 7.). Roční částka je odvozená,
+ * backend ji přepočítá a neukládá. Starší override bez rozvrhu dopočítáme z roční.
+ */
+function normalizePausalMonthly(year: number) {
+  const m = taxModel.value
+  if (!m) return
+  const segs = Array.isArray(m.pausal_monthly) ? m.pausal_monthly : []
+  if (!segs.length) {
+    const a = m.pausal_annual || {}
+    m.pausal_monthly = [{
+      from: `${year}-01-01`,
+      band1: Math.round(((a.band1 ?? 0) / 12) * 100) / 100,
+      band2: Math.round(((a.band2 ?? 0) / 12) * 100) / 100,
+      band3: Math.round(((a.band3 ?? 0) / 12) * 100) / 100,
+    }]
+    return
+  }
+  // Ukotvi k editovanému roku (klonovaný rok nese data předchozího) a setřiď.
+  m.pausal_monthly = segs
+    .map(s => ({ ...s, from: `${year}-${(s.from || '').slice(5, 7) || '01'}-01` }))
+    .sort((a, b) => a.from.localeCompare(b.from))
+  m.pausal_monthly[0].from = `${year}-01-01`
+}
+
+const pausalMonthOptions = computed(() =>
+  Array.from({ length: 12 }, (_, i) => ({
+    value: `${taxYear.value}-${String(i + 1).padStart(2, '0')}-01`,
+    label: formatMonth(`${taxYear.value}-${String(i + 1).padStart(2, '0')}`),
+  })))
+
+/** Roční částka = součet 12 měsíčních záloh (zrcadlo PausalSchedule::annual). */
+const pausalAnnualPreview = computed<Record<string, number>>(() => {
+  const segs = taxModel.value?.pausal_monthly ?? []
+  const out: Record<string, number> = { band1: 0, band2: 0, band3: 0 }
+  if (!segs.length) return out
+  for (let mo = 1; mo <= 12; mo++) {
+    const key = `${taxYear.value}-${String(mo).padStart(2, '0')}-01`
+    let cur = segs[0]
+    for (const s of segs) if (s.from <= key) cur = s
+    for (const b of taxBands) out[b] += Number((cur as any)[b] || 0)
+  }
+  return out
+})
+
+function addPausalSegment() {
+  const segs = taxModel.value?.pausal_monthly
+  if (!segs?.length) return
+  const last = segs[segs.length - 1]
+  const nextMonth = Number(last.from.slice(5, 7)) + 1
+  if (nextMonth > 12) return
+  segs.push({ ...last, from: `${taxYear.value}-${String(nextMonth).padStart(2, '0')}-01` })
+}
+function removePausalSegment(i: number) {
+  if (i > 0) taxModel.value?.pausal_monthly.splice(i, 1)
+}
+/** Po ruční změně data drž období vzestupně (backend jinak zápis odmítne). */
+function sortPausalSegments() {
+  taxModel.value?.pausal_monthly.sort((a, b) => a.from.localeCompare(b.from))
+}
+function pausalMonthTaken(value: string, i: number): boolean {
+  return (taxModel.value?.pausal_monthly ?? []).some((s, j) => j !== i && s.from === value)
 }
 
 /** Přidá další rok (nejnovější + 1) předvyplněný hodnotami nejnovějšího roku a rovnou ho uloží do DB,
@@ -592,6 +659,12 @@ async function addTaxYear() {
   if (!base) return
   const cloned = JSON.parse(JSON.stringify(base.data))
   cloned.year = newYear
+  // Rozvrh paušálních záloh je vázaný na rok: do nového roku přebíráme poslední
+  // platnou sazbu jako jediné období od 1. 1. (změnu si admin doplní sám).
+  const baseSegs = Array.isArray(cloned.pausal_monthly) ? cloned.pausal_monthly : []
+  if (baseSegs.length) {
+    cloned.pausal_monthly = [{ ...baseSegs[baseSegs.length - 1], from: `${newYear}-01-01` }]
+  }
   taxSaving.value = true
   try {
     const saved = await taxConstantsApi.save(newYear, cloned)
@@ -1191,11 +1264,33 @@ watch(tab, (newTab) => {
         <!-- Paušální daň -->
         <div class="bg-surface border border-neutral-200 rounded-lg p-4 shadow-sm">
           <h3 class="text-xs font-semibold uppercase tracking-wide text-neutral-500 mb-3">{{ t('codebooks.tax_g_pausal') }}</h3>
-          <div class="grid grid-cols-3 gap-3">
-            <label v-for="(b, i) in taxBands" :key="b" class="block">
-              <span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_band', { n: i + 1 }) }}</span>
-              <input v-model.number="taxModel.pausal_annual[b]" type="number" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" />
+          <p class="text-[11px] text-neutral-400 mb-3">{{ t('codebooks.tax_pausal_hint') }}</p>
+
+          <div v-for="(seg, i) in taxModel.pausal_monthly" :key="seg.from" class="grid grid-cols-[1fr_repeat(3,minmax(0,1fr))_auto] gap-2 items-end mb-2">
+            <label class="block">
+              <span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_pausal_from') }}</span>
+              <select v-if="i > 0" v-model="seg.from" @change="sortPausalSegments"
+                class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm bg-surface">
+                <option v-for="o in pausalMonthOptions" :key="o.value" :value="o.value" :disabled="pausalMonthTaken(o.value, i)">{{ o.label }}</option>
+              </select>
+              <div v-else class="mt-0.5 h-8 flex items-center px-2 text-sm text-neutral-500">{{ pausalMonthOptions[0]?.label }}</div>
             </label>
+            <label v-for="(b, bi) in taxBands" :key="b" class="block">
+              <span class="text-xs text-neutral-500">{{ t('codebooks.tax_f_band', { n: bi + 1 }) }}</span>
+              <input v-model.number="seg[b]" type="number" min="0" class="mt-0.5 h-8 w-full px-2 border border-neutral-300 rounded text-sm font-mono" />
+            </label>
+            <button v-if="i > 0" type="button" @click="removePausalSegment(i)"
+              class="h-8 px-2 text-danger-600 hover:bg-danger-50 rounded text-sm" :title="t('common.delete')">✕</button>
+            <span v-else class="h-8 w-8"></span>
+          </div>
+
+          <div class="flex items-center justify-between gap-3 mt-3 pt-3 border-t border-neutral-100">
+            <button type="button" @click="addPausalSegment"
+              class="text-xs text-primary-600 hover:text-primary-700 font-medium">+ {{ t('codebooks.tax_pausal_add_period') }}</button>
+            <div class="text-xs text-neutral-500">
+              {{ t('codebooks.tax_pausal_annual_derived') }}
+              <span class="font-mono text-neutral-700 ml-1">{{ taxBands.map(b => pausalAnnualPreview[b].toLocaleString('cs-CZ')).join(' · ') }}</span>
+            </div>
           </div>
         </div>
 

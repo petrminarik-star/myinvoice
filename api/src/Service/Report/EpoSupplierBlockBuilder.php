@@ -233,23 +233,41 @@ final class EpoSupplierBlockBuilder
     }
 
     /**
-     * Normalizace CZ-NACE / OKEČ hodnoty pro `c_okec`. Hodnoty z UI mohou být
-     * "62.02", "62020", "620200" apod. → strip non-digit znaků, ořež na max 6.
+     * Normalizace CZ-NACE / OKEČ hodnoty pro `c_okec` při BUILDU výkazu (BUG 7).
+     * Hodnoty z UI/ARES mohou být "73.11", "7311", "731100", ale i pouhý oddíl "74".
      *
-     * NEPADUJEME zprava nulami: CZ-NACE číselník EPO je proměnné šířky — většina
-     * položek je 5-místná (`62020`), jen pár odvětví má 6-místné podtřídy
-     * (`010111`). XSD `totalDigits=6` je MAXIMUM, ne fixní délka; skutečný výčet
-     * hodnot žije v externím číselníku MFČR
-     * (https://adisspr.mfcr.cz/pmd/dokumentace/ciselniky/). Pravostranné doplnění
-     * 5-místného kódu nulou ("62020" → "620200") vyrobí hodnotu mimo číselník
-     * a EPO podání odmítne ("hodnota musí být z číselníku"). Validitu proti
-     * číselníku zde NEKONTROLUJEME — uživatel zná svou klasifikaci.
+     * Deleguje na EpoOkecCodebook::normalize() — kanonizaci proti snapshotu
+     * číselníku ČINNOSTI (OKEC) z Daňového portálu. Zápis třídy/podtřídy dle
+     * ČSÚ se dohledá doplněním nul zprava (73.11 / 7311 → 731100), kanonické
+     * hodnoty číselníku vč. bez-nulových kódů sekcí 01–09 („14800") projdou
+     * beze změny. Kód mimo číselník se NEBLOKUJE (snapshot může zestárnout;
+     * EPO hlásí jen propustnou chybu 30) — expiraci/neznámý kód hlásí
+     * completeness check v EpoIdentityValidator jako warning.
+     *
+     * KRATŠÍ NEŽ 4 číslice → null = atribut se VYNECHÁ (c_okec je optional;
+     * oddíl z ARES v číselníku není a vyvolal by chybu 30 — chybějící kód
+     * hlásí EpoIdentityValidator jako warning).
      */
     public static function normalizeOkec(string $raw): ?string
     {
-        $digits = preg_replace('/\D/', '', $raw) ?? '';
-        if ($digits === '') return null;
-        if (strlen($digits) > 6) $digits = substr($digits, 0, 6);
-        return $digits;
+        $resolved = EpoOkecCodebook::normalize($raw);
+        return $resolved === null ? null : $resolved['code'];
+    }
+
+    /**
+     * Normalizace CZ-NACE při UKLÁDÁNÍ (Nastavení / ARES prefill) — BUG 7.
+     *
+     * Vrací:
+     *   - ''       pro prázdný vstup (pole se smaže — povolené, jen warning ve výkazech),
+     *   - kanonický kód číselníku pro platný vstup (viz normalizeOkec),
+     *   - null     pro NEPLATNÝ vstup (po stripu méně než 4 číslice, např. „74")
+     *              → volající NESMÍ uložit a vrací validační chybu.
+     */
+    public static function normalizeCzNaceInput(string $raw): ?string
+    {
+        if (trim($raw) === '') {
+            return '';
+        }
+        return self::normalizeOkec($raw);
     }
 }

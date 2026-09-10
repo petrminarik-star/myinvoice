@@ -4,11 +4,19 @@
 
 ![Přihlašovací obrazovka](img/04_login.webp)
 
-Zadej e-mail + heslo a klikni **Přihlásit**. Po přihlášení tě systém pustí na
+Pokud správce povolil přihlášení bez hesla a máš zaregistrovanou passkey,
+klikni na **Přihlásit přístupovým klíčem**. V systémovém dialogu vyber účet a
+potvrď otiskem, obličejem, PINem nebo jinou metodou zařízení. E-mail ani heslo
+nezadáváš.
+
+Jako fallback zadej e-mail + heslo a klikni **Přihlásit**. Pokud má účet
+zapnuté silné vícefaktorové ověření, následuje potvrzení passkey nebo zadání
+TOTP kódu. Po úspěšném ověření tě systém pustí na
 [Přehled (dashboard)](08_Prehled.md).
 
 | Pole | Význam |
 |---|---|
+| Přihlásit přístupovým klíčem | Přihlášení bez e-mailu a hesla; zobrazí se jen při povolení správcem |
 | E-mail | Login zadaný při registraci |
 | Heslo | Heslo zadané při registraci |
 | Zapomenuté heslo? | Odkaz na obnovu — viz § 7.4 |
@@ -24,11 +32,25 @@ e-mail přijde upozornění.
 > a pokračuj. Pokud se zablokuješ, počkej 15 minut nebo požádej admina, aby ti
 > heslo resetoval z CLI: `php api/bin/set-password.php tvuj@email.cz`.
 
-## 7.3 Dvoufaktorové ověření (TOTP / 2FA)
+## 7.3 Vícefaktorové ověření (passkey / TOTP)
 
-Pokud máš pro účet aktivované 2FA, po zadání hesla tě systém vyzve k
-6-cifernému kódu z autentikátoru. Detailní popis aktivace, použití záložních
-kódů a řešení ztráty telefonu — viz [39. Bezpečnost — § 37.2](39_Bezpecnost.md).
+Passkey lze použít přímo k přihlášení bez e-mailu a hesla, pokud tuto možnost
+povolil správce, nebo jako silný druhý krok po zadání e-mailu a hesla.
+Systémový dialog zařízení může použít otisk prstu, obličej, PIN, gesto, heslo
+zařízení nebo externí bezpečnostní klíč. MyInvoice konkrétní metodu nevybírá a
+biometrická data nikdy nedostane.
+
+Má-li účet současně aktivní TOTP, můžeš místo passkey zvolit
+**Použít kód z autentikátoru** po standardním přihlášení e-mailem a heslem a
+zadat aktuální šestimístný kód. Zrušení systémového dialogu passkey TOTP samo
+nespustí. Po zadání šesté číslice nebo vložení celého šestimístného kódu se
+přihlášení odešle automaticky, bez Enteru. Pokud ještě probíhá CAPTCHA,
+odeslání počká na její dokončení. Tlačítko **Přihlásit** zůstává dostupné
+pro ruční odeslání.
+
+MyInvoice nepoužívá záložní jednorázové recovery kódy. Obnova přístupu probíhá
+jinou passkey, TOTP nebo administrátorským CLI rescue. Podrobnosti jsou v
+[39. Bezpečnost](39_Bezpecnost.md).
 
 ## 7.4 Zapomenuté heslo
 
@@ -56,10 +78,43 @@ Můžeš si změnit:
 | Jméno | Zobrazení v UI + activity log |
 | Jazyk | `cs` (čeština) nebo `en` (angličtina) — UI + e-mailové šablony |
 | Heslo | Změna stávajícího hesla (vyžaduje původní) |
-| 2FA | Aktivovat / deaktivovat (vyžaduje heslo + ověření TOTP kódem) |
+| TOTP | Zobrazit stav a aktivovat pomocí QR + ověřovacího kódu |
+| Passkeys | Přidat, pojmenovat, přejmenovat nebo odvolat přístupový klíč |
+| Zámek aplikace | Převzít interval správce nebo zvolit vlastní přísnější interval |
 
-## 7.6 Odhlášení
+Pro běžný účet je vhodné mít dvě passkeys, případně jednu passkey a aktivní
+TOTP. Přidání nebo odvolání passkey vyžaduje čerstvé ověření existujícím silným
+faktorem, a to podle toho, co účet zrovna má:
+
+| Stav účtu | Co registrace vyžádá |
+|---|---|
+| Žádný silný faktor | Aktuální heslo |
+| Aktivní TOTP, zatím žádná passkey | **Povinně kód z autentikátoru** — jiný silný faktor k ověření neexistuje |
+| Alespoň jedna passkey | Potvrzení existující passkey; kód z autentikátoru je volitelná alternativa |
+
+## 7.6 Zamknutí a odemčení aplikace
+
+V uživatelském menu můžeš zvolit **Zamknout**. V profilu na záložce
+**Zámek aplikace** lze také nastavit automatické zamknutí po nečinnosti.
+Volba **Použít nastavení správce** převezme společnou politiku instalace.
+Vlastní kladný interval může být pouze kratší nebo stejný jako limit správce.
+Pokud správce automatický zámek nevynucuje (`0`), můžeš jej pro svůj účet
+dobrovolně zapnout v rozsahu 1 až 1440 minut.
+
+Zámek je uložený na serveru: nejde jen o překryv obrazovky a zamčená session
+nemůže číst ani měnit business data přes API.
+
+Pro odemčení stiskni **Odemknout pomocí passkey** a potvrď systémový dialog.
+Odemčení nevyžaduje znovu zadat e-mail a heslo. Když passkey není dostupná,
+zvol **Přihlásit se znovu**; aplikace nejprve bezpečně ukončí zamčenou session
+a provede celý login včetně MFA.
+
+Zámek zachová rozepsaný formulář pouze po dobu, kdy prohlížeč drží stránku
+v paměti. Pokud Android stránku ukončí, neuložené změny se ztratí. Webová PWA
+také nedokáže garantovat zákaz screenshotu ani skrytí náhledu v Android Recents.
+
+## 7.7 Odhlášení
 
 V pravém horním rohu klikni **Odhlásit**. Session se zruší okamžitě i na
-serveru. Pokud nezmáčkneš odhlásit a jen zavřeš okno, session vyprší **za 30
-dní**.
+serveru. Pokud nezmáčkneš odhlásit a jen zavřeš okno, session má absolutní
+platnost nejvýše **30 dní**; během ní se může dříve zamknout po nečinnosti.

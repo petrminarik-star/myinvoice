@@ -8,7 +8,13 @@ import { useI18n } from 'vue-i18n'
 // nahrazuje — pro volající kód je to drop-in náhrada.
 defineOptions({ inheritAttrs: false })
 
-const props = defineProps<{ modelValue?: string | null }>()
+const props = defineProps<{
+  modelValue?: string | null
+  /** ISO meze — hlídají ruční zápis i nabídku nativního kalendáře. */
+  min?: string
+  max?: string
+  disabled?: boolean
+}>()
 const emit = defineEmits<{
   (e: 'update:modelValue', value: string): void
   (e: 'change', value: string): void
@@ -55,8 +61,8 @@ function commit(iso: string) {
 
 function commitText() {
   const iso = czToIso(text.value)
-  if (iso === null) {
-    // neplatný zápis → vrátit poslední platnou hodnotu
+  if (iso === null || (iso !== '' && ((props.min && iso < props.min) || (props.max && iso > props.max)))) {
+    // neplatný zápis nebo mimo min/max → vrátit poslední platnou hodnotu
     text.value = isoToCz(props.modelValue ?? '')
     return
   }
@@ -65,7 +71,7 @@ function commitText() {
 
 function openPicker() {
   const el = pickerEl.value
-  if (!el) return
+  if (!el || props.disabled) return
   try { el.showPicker() } catch { el.focus() }
 }
 </script>
@@ -77,13 +83,14 @@ function openPicker() {
       type="text"
       inputmode="numeric"
       autocomplete="off"
+      :disabled="disabled"
       :placeholder="t('common.date_placeholder')"
       v-bind="$attrs"
       @blur="commitText"
       @keydown.enter="commitText"
     />
-    <button type="button" tabindex="-1" :aria-label="t('common.open_calendar')" @click="openPicker"
-            class="absolute right-2 top-1/2 -translate-y-1/2 cursor-pointer text-neutral-400 hover:text-neutral-600">
+    <button type="button" tabindex="-1" :disabled="disabled" :aria-label="t('common.open_calendar')" @click="openPicker"
+            class="absolute right-2 top-1/2 -translate-y-1/2 cursor-pointer text-neutral-400 hover:text-neutral-600 disabled:opacity-40 disabled:cursor-default">
       <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2">
         <rect x="3" y="4" width="18" height="17" rx="2" />
         <path stroke-linecap="round" d="M8 2.5v3.5M16 2.5v3.5M3 9.5h18" />
@@ -93,6 +100,9 @@ function openPicker() {
       ref="pickerEl"
       :value="modelValue ?? ''"
       type="date"
+      :min="min"
+      :max="max"
+      :disabled="disabled"
       tabindex="-1"
       aria-hidden="true"
       class="absolute right-0 bottom-0 w-px h-px opacity-0 pointer-events-none"

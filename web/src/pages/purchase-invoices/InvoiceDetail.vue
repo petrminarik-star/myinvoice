@@ -305,9 +305,9 @@ const canForceEdit = computed(() =>
 
 function confirmForceEdit() {
   if (!invoice.value) return
-  const status = t('purchase_invoice.status.' + invoice.value.status)
-  if (!confirm(t('purchase_invoice.force_edit_confirm', { status }))) return
-  router.push(`/purchase-invoices/${invoice.value.id}/edit?force=1`)
+  // Bez ?force=1 — editor se otevře uzamčený a odemyká se až potvrzovacím
+  // modalem s checkboxem přímo v něm (příznak nepřežije reload).
+  router.push(`/purchase-invoices/${invoice.value.id}/edit`)
 }
 const canDelete = computed(() => invoice.value?.status === 'draft')
 
@@ -414,7 +414,7 @@ function actionBadgeClass(action: string): string {
   if (short.startsWith('transitioned')) return 'bg-primary-50 text-primary-700 border border-primary-500/40'
   if (short.includes('pdf'))            return 'bg-neutral-100 text-neutral-600 border border-neutral-200'
   if (short.includes('deleted') || short.includes('cancelled')) return 'bg-danger-50 text-danger-500 border border-danger-500/40'
-  if (short.includes('updated'))        return 'bg-warning-50 text-warning-600 border border-warning-500/40'
+  if (short.includes('updated') || short.includes('force'))     return 'bg-warning-50 text-warning-600 border border-warning-500/40'
   return 'bg-neutral-100 text-neutral-600 border border-neutral-200'
 }
 
@@ -524,6 +524,18 @@ const purchaseActions = computed<ActionItem[]>(() => {
       >
         {{ t('purchase_invoice.extraction.dismiss') }}
       </button>
+    </div>
+
+    <!-- ═══ Info: poplatek orgánu veřejné moci → plnění mimo předmět daně (§ 5/4 ZDPH) ═══ -->
+    <div v-if="invoice._warnings?.includes('public_authority_fee_out_of_scope')"
+      class="p-3 bg-warning-50 border border-warning-500/40 rounded-md text-sm text-warning-700">
+      ⚠ {{ t('purchase_invoice.warning.public_authority_fee_out_of_scope') }}
+    </div>
+
+    <!-- ═══ Varování: doklad s daní bez klasifikace → tiše mimo přiznání i KH ═══ -->
+    <div v-if="invoice._warnings?.includes('missing_vat_classification')"
+      class="p-3 bg-warning-50 border border-warning-500/40 rounded-md text-sm text-warning-700">
+      ⚠ {{ t('purchase_invoice.warning.missing_vat_classification') }}
     </div>
 
     <!-- ═══ Hlavička: varsymbol + status + akce ═══ -->

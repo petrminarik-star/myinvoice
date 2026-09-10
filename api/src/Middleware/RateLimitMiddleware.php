@@ -119,6 +119,32 @@ final class RateLimitMiddleware implements MiddlewareInterface
         if ($path === '/api/auth/login' && $method === 'POST') {
             return ['rl:login:ip:' . $this->ipBucket($ip), (int) ($rl['login_per_min_per_ip'] ?? 10), 60];
         }
+        if ($path === '/api/auth/webauthn/login/verify' && $method === 'POST') {
+            return ['rl:passkey-login:ip:' . $this->ipBucket($ip), (int) ($rl['login_per_min_per_ip'] ?? 10), 60];
+        }
+        if ($path === '/api/auth/webauthn/login/options' && $method === 'POST') {
+            return ['rl:passkey-login-options:ip:' . $this->ipBucket($ip), (int) ($rl['login_per_min_per_ip'] ?? 10), 60];
+        }
+
+        if ($userId > 0 && str_starts_with($path, '/api/auth/session/')) {
+            if (in_array($path, [
+                '/api/auth/session/status',
+                '/api/auth/session/activity',
+            ], true)) {
+                $sessionToken = (string) $request->getAttribute(AuthMiddleware::ATTR_TOKEN, '');
+                $subject = $sessionToken !== ''
+                    ? 'session:' . hash('sha256', $sessionToken)
+                    : 'user:' . $userId;
+                return ['rl:session-poll:' . sha1($path) . ':' . $subject, 120, 60];
+            }
+            return ['rl:session:' . sha1($path) . ':user:' . $userId, 20, 60];
+        }
+        if ($userId > 0 && (
+            str_starts_with($path, '/api/auth/webauthn/')
+            || str_starts_with($path, '/api/auth/mfa/step-up/')
+        )) {
+            return ['rl:webauthn:' . sha1($path) . ':user:' . $userId, 20, 60];
+        }
 
         // Forgot — per email
         if ($path === '/api/auth/forgot' && $method === 'POST') {

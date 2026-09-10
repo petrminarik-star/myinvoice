@@ -7,6 +7,7 @@ import { purchaseInvoicesApi, type InboxScanResult } from '@/api/purchaseInvoice
 import { integrationsApi, type AnthropicCredentialsStatus } from '@/api/integrations'
 import { useToast } from '@/composables/useToast'
 import { apiErrorMessage } from '@/api/errors'
+import { useAuthStore } from '@/stores/auth'
 
 type TabKey = 'issued' | 'purchase'
 
@@ -14,6 +15,9 @@ const { t } = useI18n()
 const router = useRouter()
 const route = useRoute()
 const toast = useToast()
+const auth = useAuthStore()
+// Nastavení AI klíče je v admin-only Integracích — účetnímu odkaz nenabízíme.
+const isAdmin = computed(() => auth.user?.role === 'admin')
 
 // Tab inicializace z URL (?tab=issued|purchase) — pojďme respektovat hash i query
 const initialTab: TabKey = (() => {
@@ -282,7 +286,7 @@ async function runScan() {
                class="rounded-md bg-warning-50 border border-warning-500/40 px-3 py-2 text-sm text-warning-700">
             <strong>⚠ {{ t('imports.ai_not_configured_title') }}</strong>
             <span class="ml-2 text-xs">{{ t('imports.ai_not_configured_hint') }}</span>
-            <RouterLink to="/admin/integrations?tab=ai" class="ml-1 text-xs text-primary-700 hover:underline whitespace-nowrap">
+            <RouterLink v-if="isAdmin" to="/admin/integrations?tab=ai" class="ml-1 text-xs text-primary-700 hover:underline whitespace-nowrap">
               → {{ t('nav.ai_import') }}
             </RouterLink>
           </div>

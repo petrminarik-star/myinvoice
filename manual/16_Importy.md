@@ -15,7 +15,10 @@ Existují dvě cesty:
 
 ## 16.1 Obrazovka importů
 
-V hlavním menu **Systém → Importy**.
+V hlavním menu **Prodej → Import vystavených** a **Nákup → Import přijatých** —
+jde o jednu stránku se dvěma záložkami. Vidí ji admin i účetní (`accountant`),
+role `readonly` ne. Nastavení API integrací (klíče k iDokladu, Fakturoidu a AI)
+je oddělené v **Systém → Externí integrace** a smí do něj jen admin.
 
 Formulář:
 

@@ -70,6 +70,8 @@ final class ApiScopeMiddlewareTest extends TestCase
         foreach ([
             '/api/auth/tokens',
             '/api/auth/login',
+            '/api/auth/webauthn/credentials',
+            '/api/auth/webauthn/register/options',
             '/api/settings/signing',
             '/api/settings/signing/profiles/1/credentials/certificate',
             '/api/settings/bank-email-notices',

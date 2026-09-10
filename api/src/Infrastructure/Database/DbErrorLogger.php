@@ -31,8 +31,15 @@ final class DbErrorLogger
         '/\btotp_secret\b/i',
         '/\brecovery_codes\b/i',
         '/\bapi_token\b/i',
+        '/\bcredential_id(?:_hash)?\b/i',
+        '/\bpublic_key\b/i',
+        '/\bchallenge\b/i',
+        '/\boptions_json\b/i',
+        '/\bsession_id_hash\b/i',
+        '/\bflow_token_hash\b/i',
     ];
 
+    /** @param array<array-key,mixed> $params */
     public static function log(LoggerInterface $logger, PDOException $e, string $sql, array $params): void
     {
         $logger->error('DB error: ' . $e->getMessage(), [
@@ -48,6 +55,10 @@ final class DbErrorLogger
         return (string) preg_replace('/\s+/', ' ', trim($sql));
     }
 
+    /**
+     * @param array<array-key,mixed> $params
+     * @return array<array-key,mixed>
+     */
     private static function redact(string $sql, array $params): array
     {
         foreach (self::SENSITIVE_PATTERNS as $pat) {

@@ -4,7 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
 import { useToast } from '@/composables/useToast'
-import { onUnmounted } from 'vue'
+import { useSessionAwarePolling } from '@/composables/useSessionAwarePolling'
 import {
   documentsApi, type DocItem, type DocFolder, type BreadcrumbItem, type DocJob, type TagInfo,
   type UploadSkip,
@@ -68,7 +68,7 @@ const folderInput = ref<HTMLInputElement | null>(null)
 
 // background jobs (ZIP import/export)
 const jobs = ref<DocJob[]>([])
-let jobTimer: ReturnType<typeof setInterval> | null = null
+const jobsPollingEnabled = ref(true)
 const anyJobActive = computed(() => jobs.value.some(j => j.status === 'queued' || j.status === 'running'))
 
 // move modal
@@ -296,10 +296,10 @@ async function emptyTrash() {
 }
 
 // ───── upload ─────
-async function loadJobs() {
+async function loadJobs(signal?: AbortSignal) {
   try {
     const prev = jobs.value
-    jobs.value = await documentsApi.jobs()
+    jobs.value = await documentsApi.jobs(signal)
     for (const j of jobs.value) {
       const old = prev.find(p => p.id === j.id)
       if (old && (old.status === 'queued' || old.status === 'running') && old.status !== j.status) {
@@ -320,12 +320,10 @@ async function loadJobs() {
       }
     }
   } catch { /* keep */ }
-  syncPolling()
+  jobsPollingEnabled.value = anyJobActive.value
 }
-function syncPolling() {
-  if (anyJobActive.value && !jobTimer) jobTimer = setInterval(loadJobs, 2000)
-  else if (!anyJobActive.value && jobTimer) { clearInterval(jobTimer); jobTimer = null }
-}
+
+useSessionAwarePolling(signal => loadJobs(signal), 2000, jobsPollingEnabled)
 async function cancelJob(j: DocJob) {
   await documentsApi.cancelJob(j.id)
   loadJobs()
@@ -509,9 +507,8 @@ function walkEntry(entry: any, parentPath: string, out: { file: File; path: stri
 
 onMounted(() => {
   canHover.value = window.matchMedia('(hover: hover)').matches
-  trashMode.value ? loadTrash() : loadListing(); loadJobs(); loadTags()
+  trashMode.value ? loadTrash() : loadListing(); loadTags()
 })
-onUnmounted(() => { if (jobTimer) clearInterval(jobTimer) })
 </script>
 
 <template>

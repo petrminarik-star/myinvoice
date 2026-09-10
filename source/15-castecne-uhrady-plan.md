@@ -132,6 +132,7 @@ deduction řádky finálu + advance výpočet; VarsymbolGenerator alias; Invoice
 ## Mimo rozsah (vědomě)
 
 - Částečné úhrady přijatých faktur (payment_matches už N:N umí; UI sumarizace případně později).
-- Kurzové rozdíly částečných úhrad cizoměnových faktur (platba se eviduje v měně faktury,
-  CZK platba EUR faktury se přepočítá kurzem faktury — shodně s dnešním matcherem).
+- Kurzové rozdíly částečných úhrad cizoměnových faktur (platba se eviduje v měně faktury;
+  částečná CZK platba EUR faktury se přepočítá kurzem faktury, zatímco úplný FX match
+  vyrovná celý zbytek a skutečnou CZK částku ponechá na bankovní transakci).
 - Přeplatky → automatický dobropis / vratka.

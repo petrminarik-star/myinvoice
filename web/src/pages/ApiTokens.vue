@@ -6,6 +6,8 @@ import { tokensApi, type ApiToken, type CreateTokenResult } from '@/api/tokens'
 import { useAuthStore } from '@/stores/auth'
 import { useSupplierStore } from '@/stores/supplier'
 import { useToast } from '@/composables/useToast'
+import { authApi } from '@/api/auth'
+import { getCredential, isWebAuthnAvailable, webAuthnErrorKey } from '@/security/webauthn'
 
 const { t } = useI18n()
 const auth = useAuthStore()
@@ -19,7 +21,10 @@ const error = ref('')
 // Create modal state
 const showCreate = ref(false)
 const createBusy = ref(false)
+const passkeyBusy = ref(false)
 const createError = ref('')
+const passkeyStepUpToken = ref('')
+const passkeySupported = isWebAuthnAvailable()
 const form = ref({
   name: '',
   supplier_id: null as number | null,
@@ -35,6 +40,11 @@ const copied = ref(false)
 const confirmCopied = ref(false)
 
 const needsTotp = computed(() => auth.user?.totp_enabled === true)
+const hasPasskey = computed(() =>
+  auth.user?.mfa_methods?.includes('passkey') === true
+  || (auth.user?.passkey_count ?? 0) > 0,
+)
+const needsStepUp = computed(() => needsTotp.value || hasPasskey.value)
 
 async function load() {
   loading.value = true
@@ -57,7 +67,39 @@ function openCreate() {
     totp_code: '',
   }
   createError.value = ''
+  passkeyStepUpToken.value = ''
   showCreate.value = true
+}
+
+async function verifyWithPasskey() {
+  if (!passkeySupported) return
+  passkeyBusy.value = true
+  createError.value = ''
+  passkeyStepUpToken.value = ''
+  try {
+    const flow = await authApi.passkeyStepUpOptions('api_token.create')
+    const credential = await getCredential(flow.public_key)
+    passkeyStepUpToken.value = await authApi.passkeyStepUpVerify(
+      flow.flow_token,
+      'api_token.create',
+      credential,
+    )
+    form.value.totp_code = ''
+  } catch (e: any) {
+    const ceremonyError = webAuthnErrorKey(e)
+    createError.value = ceremonyError !== null
+      ? t(ceremonyError)
+      : e?.response?.data?.error?.message || t('api_tokens.passkey_failed')
+  } finally {
+    passkeyBusy.value = false
+  }
+}
+
+function closeCreate() {
+  if (createBusy.value || passkeyBusy.value) return
+  passkeyStepUpToken.value = ''
+  form.value.totp_code = ''
+  showCreate.value = false
 }
 
 async function submitCreate() {
@@ -65,26 +107,37 @@ async function submitCreate() {
     createError.value = t('api_tokens.name_required')
     return
   }
-  if (needsTotp.value && !/^\d{6}$/.test(form.value.totp_code)) {
-    createError.value = t('auth.totp_invalid')
+  const hasValidTotp = needsTotp.value && /^\d{6}$/.test(form.value.totp_code)
+  if (needsStepUp.value && !passkeyStepUpToken.value && !hasValidTotp) {
+    createError.value = t('api_tokens.step_up_required')
     return
   }
   createBusy.value = true
   createError.value = ''
+  const proof = passkeyStepUpToken.value
   try {
     const res = await tokensApi.create({
       name: form.value.name.trim(),
       supplier_id: form.value.supplier_id,
       scope: form.value.scope,
       expires_at: form.value.expires_at || null,
-      totp_code: needsTotp.value ? form.value.totp_code : undefined,
+      totp_code: !proof && hasValidTotp ? form.value.totp_code : undefined,
+      step_up_token: proof || undefined,
     })
+    passkeyStepUpToken.value = ''
     showCreate.value = false
     revealed.value = res
     confirmCopied.value = false
     copied.value = false
     await load()
   } catch (e: any) {
+    // Server validuje supplier_id i expires_at ještě před spotřebou jednorázového
+    // proofu, takže po jiné než step-up chybě zůstává passkey ověření platné —
+    // nenutíme uživatele znovu sahat na klíč. TOTP kód je spotřebovaný vždy.
+    if (e?.response?.data?.error?.code === 'step_up_proof_invalid') {
+      passkeyStepUpToken.value = ''
+    }
+    form.value.totp_code = ''
     createError.value = e?.response?.data?.error?.message || t('common.error')
   } finally {
     createBusy.value = false
@@ -264,7 +317,20 @@ onMounted(load)
               class="mt-1 w-full h-10 px-3 border border-neutral-300 rounded-md" />
           </label>
 
-          <label v-if="needsTotp" class="block text-sm">
+          <div v-if="hasPasskey" class="rounded-md border border-neutral-200 bg-neutral-50 p-3">
+            <p class="text-sm text-neutral-700 mb-2">{{ t('api_tokens.step_up_hint') }}</p>
+            <div v-if="passkeyStepUpToken"
+              class="text-sm font-medium text-success-600">
+              ✓ {{ t('api_tokens.passkey_verified') }}
+            </div>
+            <button v-else-if="passkeySupported" type="button" @click="verifyWithPasskey" :disabled="passkeyBusy || createBusy"
+              class="cursor-pointer h-10 px-4 border border-primary-600 text-primary-700 hover:bg-primary-50 disabled:border-neutral-300 disabled:text-neutral-400 rounded-md font-medium">
+              {{ passkeyBusy ? t('auth.passkey_verifying') : t('api_tokens.verify_passkey') }}
+            </button>
+            <p v-else class="text-sm text-warning-700">{{ t('api_tokens.passkey_unsupported') }}</p>
+          </div>
+
+          <label v-if="needsTotp && !passkeyStepUpToken" class="block text-sm">
             <span class="text-neutral-700 font-medium">{{ t('auth.totp_code') }}</span>
             <input v-model="form.totp_code" type="text" inputmode="numeric" maxlength="6" pattern="\d{6}"
               placeholder="000000"
@@ -279,11 +345,11 @@ onMounted(load)
         </div>
 
         <div class="mt-5 flex justify-end gap-2">
-          <button @click="showCreate = false"
+          <button @click="closeCreate" :disabled="createBusy || passkeyBusy"
             class="cursor-pointer h-10 px-4 border border-neutral-300 rounded-md text-neutral-700 hover:bg-neutral-50">
             {{ t('common.cancel') }}
           </button>
-          <button @click="submitCreate" :disabled="createBusy"
+          <button @click="submitCreate" :disabled="createBusy || passkeyBusy"
             class="cursor-pointer h-10 px-4 bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white font-medium rounded-md">
             {{ createBusy ? '…' : t('api_tokens.create') }}
           </button>

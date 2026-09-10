@@ -198,6 +198,35 @@ final class RoleMiddlewareTest extends TestCase
         self::assertSame(204, $response->getStatusCode());
     }
 
+    public function testAllRolesCanManageOwnPasskeys(): void
+    {
+        foreach (['readonly', 'accountant', 'admin'] as $role) {
+            foreach ([
+                ['GET', '/api/auth/webauthn/credentials'],
+                ['POST', '/api/auth/webauthn/register/options'],
+                ['POST', '/api/auth/webauthn/register/verify'],
+                ['POST', '/api/auth/webauthn/step-up/options'],
+                ['POST', '/api/auth/webauthn/step-up/verify'],
+                ['POST', '/api/auth/mfa/step-up/totp'],
+                ['GET', '/api/auth/session/status'],
+                ['POST', '/api/auth/session/activity'],
+                ['POST', '/api/auth/session/lock'],
+                ['GET', '/api/auth/session/lock-preference'],
+                ['PUT', '/api/auth/session/lock-preference'],
+                ['POST', '/api/auth/session/unlock/options'],
+                ['POST', '/api/auth/session/unlock/verify'],
+                ['PATCH', '/api/auth/webauthn/credentials/42'],
+                ['DELETE', '/api/auth/webauthn/credentials/42'],
+            ] as [$method, $path]) {
+                $response = $this->middleware()->process(
+                    $this->request($method, $path, $role),
+                    $this->okHandler(),
+                );
+                self::assertSame(204, $response->getStatusCode(), "$role $method $path");
+            }
+        }
+    }
+
     /**
      * Oprava funkční mezery: účetní smí plnou CRUD na přijatých fakturách.
      */
@@ -228,6 +257,42 @@ final class RoleMiddlewareTest extends TestCase
         self::assertSame(403, $response->getStatusCode());
     }
 
+    public function testAccountantCanMutateRecurringTemplates(): void
+    {
+        foreach ([
+            ['POST', '/api/recurring'],
+            ['PUT', '/api/recurring/5'],
+            ['DELETE', '/api/recurring/5'],
+            ['POST', '/api/recurring/5/pause'],
+            ['POST', '/api/recurring/5/resume'],
+            ['POST', '/api/recurring/5/run-now'],
+        ] as [$method, $path]) {
+            $response = $this->middleware()->process(
+                $this->request($method, $path, 'accountant'),
+                $this->okHandler(),
+            );
+            self::assertSame(204, $response->getStatusCode(), "accountant $method $path");
+        }
+    }
+
+    public function testReadonlyCannotMutateRecurringTemplates(): void
+    {
+        foreach ([
+            ['POST', '/api/recurring'],
+            ['PUT', '/api/recurring/5'],
+            ['DELETE', '/api/recurring/5'],
+            ['POST', '/api/recurring/5/pause'],
+            ['POST', '/api/recurring/5/resume'],
+            ['POST', '/api/recurring/5/run-now'],
+        ] as [$method, $path]) {
+            $response = $this->middleware()->process(
+                $this->request($method, $path, 'readonly'),
+                $this->okHandler(),
+            );
+            self::assertSame(403, $response->getStatusCode(), "readonly $method $path");
+        }
+    }
+
     public function testAccountantCanReadImportJobStatusAndSigningSettings(): void
     {
         foreach (['/api/admin/imports/42', '/api/settings/signing'] as $path) {
@@ -245,9 +310,78 @@ final class RoleMiddlewareTest extends TestCase
         self::assertSame(403, $response->getStatusCode());
     }
 
+    /**
+     * Import dokladů = data, ne konfigurace. Action vrstva (ImportAction,
+     * Start*ImportAction, AiExtractPdfAction, Cancel/DeleteImportJobAction) povoluje
+     * admin|accountant — middleware ho tam musí vůbec pustit.
+     */
+    public function testAccountantCanRunImports(): void
+    {
+        foreach ([
+            ['POST', '/api/admin/import'],
+            ['POST', '/api/admin/imports/idoklad/start'],
+            ['POST', '/api/admin/imports/fakturoid/start'],
+            ['POST', '/api/admin/imports/ai-extract-pdf'],
+            ['POST', '/api/admin/imports/42/cancel'],
+            ['DELETE', '/api/admin/imports/42'],
+            ['GET', '/api/admin/imports/anthropic/credentials'],
+        ] as [$method, $path]) {
+            $response = $this->middleware()->process(
+                $this->request($method, $path, 'accountant'),
+                $this->okHandler(),
+            );
+            self::assertSame(204, $response->getStatusCode(), "accountant $method $path");
+        }
+    }
+
+    /** Konfigurace integrací (API klíče) zůstává admin-only. */
+    public function testAccountantCannotManageIntegrationCredentials(): void
+    {
+        foreach ([
+            ['PUT', '/api/admin/imports/idoklad/credentials'],
+            ['DELETE', '/api/admin/imports/idoklad/credentials'],
+            ['PUT', '/api/admin/imports/fakturoid/credentials'],
+            ['DELETE', '/api/admin/imports/fakturoid/credentials'],
+            ['PUT', '/api/admin/imports/anthropic/credentials'],
+            ['DELETE', '/api/admin/imports/anthropic/credentials'],
+            ['GET', '/api/admin/imports/idoklad/credentials'],
+            ['GET', '/api/admin/imports/fakturoid/credentials'],
+        ] as [$method, $path]) {
+            $response = $this->middleware()->process(
+                $this->request($method, $path, 'accountant'),
+                $this->okHandler(),
+            );
+            self::assertSame(403, $response->getStatusCode(), "accountant $method $path");
+        }
+    }
+
+    public function testReadonlyCannotRunImports(): void
+    {
+        foreach ([
+            ['POST', '/api/admin/import'],
+            ['POST', '/api/admin/imports/idoklad/start'],
+            ['POST', '/api/admin/imports/fakturoid/start'],
+            ['POST', '/api/admin/imports/ai-extract-pdf'],
+            ['POST', '/api/admin/imports/42/cancel'],
+            ['DELETE', '/api/admin/imports/42'],
+            ['GET', '/api/admin/imports/anthropic/credentials'],
+        ] as [$method, $path]) {
+            $response = $this->middleware()->process(
+                $this->request($method, $path, 'readonly'),
+                $this->okHandler(),
+            );
+            self::assertSame(403, $response->getStatusCode(), "readonly $method $path");
+        }
+    }
+
     private function middleware(): RoleMiddleware
     {
-        return new RoleMiddleware(new ResponseFactory());
+        // Bez membershipu = žádný per-supplier override (BC větev resolveru).
+        $resolver = $this->createStub(\MyInvoice\Service\Tenant\SupplierAccessResolver::class);
+        $resolver->method('resolve')->willReturn(
+            new \MyInvoice\Service\Tenant\SupplierAccess(0, false, null),
+        );
+        return new RoleMiddleware(new ResponseFactory(), $resolver);
     }
 
     private function request(string $method, string $path, string $role): ServerRequestInterface

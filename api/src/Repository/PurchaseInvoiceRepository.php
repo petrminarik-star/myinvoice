@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace MyInvoice\Repository;
 
 use MyInvoice\Infrastructure\Database\Connection;
+use MyInvoice\Service\Invoice\OverduePolicy;
+use MyInvoice\Support\PublicAuthorityFeeText;
 use PDO;
 
 /**
@@ -29,6 +31,7 @@ final class PurchaseInvoiceRepository
     public function __construct(
         private readonly Connection $db,
         private readonly TaxConstantsRepository $taxConstants,
+        private readonly OverduePolicy $overduePolicy,
     ) {}
 
     /**
@@ -261,7 +264,8 @@ final class PurchaseInvoiceRepository
             $where[] = "pi.status IN ('received','booked')";
         }
         if (!empty($filters['overdue'])) {
-            $where[] = "pi.status IN ('received','booked') AND pi.due_date <= CURDATE()";
+            $operator = $this->overduePolicy->comparisonOperator();
+            $where[] = "pi.status IN ('received','booked') AND pi.due_date {$operator} CURDATE()";
         }
         if (!empty($filters['needs_review'])) {
             $where[] = "pi.extraction_warning IS NOT NULL";
@@ -817,7 +821,13 @@ final class PurchaseInvoiceRepository
             // faktura NEDORAZILA do výkazů (VatClassificationMapper SKIPNE code=NULL).
             $code = $item['vat_classification_code'] ?? null;
             if ($code === null) {
-                $code = self::defaultClassificationCode($rate, $reverseCharge, $countryIso, $standardRate);
+                $code = self::defaultClassificationCode(
+                    $rate,
+                    $reverseCharge,
+                    $countryIso,
+                    $standardRate,
+                    PublicAuthorityFeeText::indicatesPublicAuthorityFee((string) ($item['description'] ?? '')),
+                );
             }
             $stmt->execute([
                 $purchaseInvoiceId,
@@ -832,6 +842,17 @@ final class PurchaseInvoiceRepository
                 !empty($item['is_fixed_asset']) ? 1 : 0,
             ]);
         }
+
+        // Pozn.: konzistenci hlavičkového reverse_charge s klasifikací položek
+        // ZDE ZÁMĚRNĚ neřešíme. Flip příznaku patří do Create/Update akcí, které
+        // se dívají jen na kódy VÝSLOVNĚ zadané uživatelem (VatClassificationDefaulter
+        // ::anyReverseChargeCode) a vrací o tom warning. Kdyby se flipovalo tady,
+        // vstupem by byly i kódy dosazené defaultem (24e/24 pro zahraničního
+        // dodavatele s 0 % — větev výše nezávisí na RC flagu), takže doklad
+        // s vědomě vypnutým reverse_charge by se tiše přepisoval při každém
+        // uložení i re-importu. Výkazy rozpor hlavičky a položek unesou:
+        // VatLedgerService zařazuje i samovyměřuje podle flagu NEBO kódu
+        // (23/24/24e/25) — viz testImportedServiceSelfAssessesWithoutInvoiceFlag.
     }
 
     /**
@@ -862,6 +883,9 @@ final class PurchaseInvoiceRepository
         // Základní sazba pro rok dokladu (číselník daňových konstant). Default 21
         // drží zpětnou kompatibilitu pro volání bez kontextu (CLI backfill).
         float $standardRate = 21.0,
+        // Poplatek orgánu veřejné moci ({@see PublicAuthorityFeeText}) — plnění
+        // MIMO předmět daně, nikdy se nesamovyměřuje ani u zahraničního „dodavatele".
+        bool $publicAuthorityFee = false,
     ): ?string {
         $r = (int) round($rate);
         $std = (int) round($standardRate);
@@ -879,6 +903,13 @@ final class PurchaseInvoiceRepository
         // nebo dovoz ZBOŽÍ (ř.3 / ř.7) se ze samotné sazby nepozná → tam kód vybírá
         // AI dle povahy plnění (supply_nature) nebo uživatel ručně. Dřív se mimo-EU
         // 0 % defaultovalo na 25 (ř.7 dovoz zboží), což u služeb bylo věcně špatně.
+        // Poplatek orgánu veřejné moci (soudní, správní, kolek) — orgán nejedná jako
+        // osoba povinná k dani (§ 5 odst. 4 ZDPH / čl. 13 směrnice), plnění tedy NENÍ
+        // předmětem daně a příjemci nevzniká povinnost přiznat daň ani u zahraničního
+        // soudu/úřadu. Žádný kód → doklad zůstane mimo přiznání i KH (issue #30).
+        if ($r === 0 && $publicAuthorityFee) {
+            return null;
+        }
         if ($isForeign && $r === 0) {
             return $isEu ? '24e' : '24';
         }
@@ -886,13 +917,65 @@ final class PurchaseInvoiceRepository
         // Vzácnější použití (vendor obvykle fakturuje bez DPH), ale když má 21 % sazbu
         // (typicky reverse-charge invoice s vyčíslenou daní pro info), tohle je správně.
         if ($isEu && $reverseCharge && $r >= $std) return '23';
+        // Dodavatel ze 3. země / neusazená osoba + RC + základní sazba → přijetí služby
+        // (kód 24, ř. 12 + KH A.2). Dřív takový doklad propadl na tuzemský § 92a ('5',
+        // ř. 10 + KH B.1), přestože přenesenou povinnost mezi plátci v tuzemsku
+        // se zahraničním dodavatelem uplatnit nelze. Dovoz ZBOŽÍ (ř. 7, kód 25) se ze
+        // sazby nepozná — ten vybírá AI dle povahy plnění nebo uživatel ručně.
+        if ($isForeign && $reverseCharge && $r >= $std) return '24';
         // CZ tuzemsko (nebo zahraniční vendor s CZ DPH, vzácné)
         if ($reverseCharge && $r >= $std) return '5';
+        // Tuzemský § 92a doklad se vystavuje BEZ vyčíslené daně (sazba 0 %) — dřív takový
+        // doklad propadl na null a do přiznání (ř.10 + KH B.1) se vůbec nedostal.
+        if ($reverseCharge && $r === 0)   return '5';
         if ($r >= $std)                   return '40';
         // Snížené sazby 5–15 % (12 aktuální, 10/15 historické). Pásmo 16 až <std
         // záměrně nemapujeme (např. německá 19 % není česká DPH → user vybere ručně).
         if ($r >= 5 && $r <= 15)          return '41';
         return null;
+    }
+
+    /**
+     * Doplní hlavičkovou klasifikaci z řádků, pokud na hlavičce žádná není.
+     *
+     * Kód na řádcích derivuje {@see defaultClassificationCode()} (zná zemi dodavatele
+     * i povahu plnění), takže hlavička ho jen přebírá — nikdy nerozhoduje sama. Dřív
+     * ji dopočítával VatClassificationDefaulter, který zemi dodavatele nezná: doklad
+     * v tuzemském režimu přenesené povinnosti (§ 92e stavební práce, 21 %) tak dostal
+     * '24e' → ř. 5 + KH A.2 (služba z EU) místo ř. 10 + KH B.1.
+     *
+     * Bere kód s největším součtem |total_with_vat| — u dokladu s víc kódy je hlavička
+     * jen orientační, rozhoduje řádek (výkazy čtou COALESCE(položka, hlavička)).
+     * Řádky BEZ kódu se do volby nepočítají, ale prázdná hlavička je legitimní výsledek:
+     * u plnění mimo předmět daně (§ 5 odst. 4) i u osvobozeného tuzemského plnění
+     * se kód nepřiřazuje záměrně.
+     */
+    public function syncHeaderClassificationFromItems(int $purchaseInvoiceId, int $supplierId): void
+    {
+        $pdo = $this->db->pdo();
+        $stmt = $pdo->prepare(
+            'SELECT pii.vat_classification_code AS code,
+                    SUM(ABS(COALESCE(pii.total_with_vat, 0))) AS weight
+               FROM purchase_invoice_items pii
+               JOIN purchase_invoices pi ON pi.id = pii.purchase_invoice_id
+              WHERE pii.purchase_invoice_id = ?
+                AND pi.supplier_id = ?
+                AND pii.vat_classification_code IS NOT NULL
+           GROUP BY pii.vat_classification_code
+           ORDER BY weight DESC, code ASC
+              LIMIT 1'
+        );
+        $stmt->execute([$purchaseInvoiceId, $supplierId]);
+        $code = $stmt->fetchColumn();
+        if ($code === false) {
+            return;
+        }
+        $pdo->prepare(
+            'UPDATE purchase_invoices
+                SET vat_classification_code = ?
+              WHERE id = ? AND supplier_id = ?
+                AND (vat_classification_code IS NULL OR vat_classification_code = "")'
+        )->execute([(string) $code, $purchaseInvoiceId, $supplierId]);
     }
 
     /**

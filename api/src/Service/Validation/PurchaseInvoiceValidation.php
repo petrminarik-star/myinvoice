@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace MyInvoice\Service\Validation;
 
+use MyInvoice\Support\PublicAuthorityFeeText;
+
 /**
  * Validace přijaté faktury. Vrací mapu pole → list chyb (CZ texty z ErrorCatalog jsou pro
  * runtime API messages; tato validace vrací technické zprávy, které jdou přes ErrorCatalog
@@ -175,10 +177,101 @@ final class PurchaseInvoiceValidation
             $totalBase = (float) ($invoice['total_without_vat'] ?? 0);
             if ($totalBase > 0.005) {
                 $warn[] = 'credit_note_positive_total';
+            } elseif (self::hasMixedSignItems($invoice)) {
+                // Smíšený opravný doklad (např. vrácení zboží záporně + kladný storno
+                // poplatek): evidence DPH normalizuje KAŽDOU položku přes -ABS(), takže
+                // kladný řádek se vykáže záporně. Rozlišit to nejde — `document_kind`
+                // vrubopis nezná. Pozn.: warnings() volají jen Create/Update akce, takže
+                // upozornění dostane ruční pořízení a API; importní cesty (ISDOC, iDoklad,
+                // Fakturoid, AI) jdou přes repozitář mimo ně a navíc si znaménka zpravidla
+                // samy sjednotí.
+                $warn[] = 'credit_note_mixed_sign_items';
             }
         }
 
+        // Poplatek orgánu veřejné moci v nulové sazbě — plnění mimo předmět daně
+        // (§ 5 odst. 4 ZDPH). Doklad zůstane bez klasifikace a nevstoupí do přiznání
+        // ani KH; u zahraničního soudu/úřadu se ZÁMĚRNĚ nesamovyměřuje (§ 9 odst. 1
+        // se na orgán veřejné moci nevztahuje). Upozornění to říká nahlas, ať uživatel
+        // pozná, že prázdná klasifikace je záměr, a mohl ji přepsat, když jde přece
+        // o běžnou službu. Viz issue #30.
+        foreach ((array) ($invoice['items'] ?? []) as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            if ((float) ($item['vat_rate_snapshot'] ?? 0) > 0.0) {
+                continue;
+            }
+            if (PublicAuthorityFeeText::indicatesPublicAuthorityFee((string) ($item['description'] ?? ''))) {
+                $warn[] = 'public_authority_fee_out_of_scope';
+                break;
+            }
+        }
+
+        // Doklad, který nese daň (nebo je v režimu samovyměření), ale nemá klasifikaci,
+        // ve výkazech TIŠE ZMIZÍ — VatClassificationMapper řádek bez kódu přeskočí.
+        // Stává se to u sazby, kterou český číselník nezná (cizí 19 %), a u dokladu
+        // se zahraničním dodavatelem, jehož zemi se nepodařilo určit. Osvobozené
+        // tuzemské plnění a plnění mimo předmět daně sem nepatří — u nich je prázdná
+        // klasifikace správný výsledek, proto se ptáme jen na nenulovou sazbu nebo RC.
+        if (self::hasUnclassifiedTaxableLine($invoice)) {
+            $warn[] = 'missing_vat_classification';
+        }
+
         return $warn;
+    }
+
+    /**
+     * Nese doklad řádek s daní (nebo v režimu samovyměření) bez klasifikačního kódu?
+     * Kód se hledá na řádku i na hlavičce — výkazy čtou COALESCE(položka, hlavička).
+     *
+     * @param array<string,mixed> $invoice
+     */
+    private static function hasUnclassifiedTaxableLine(array $invoice): bool
+    {
+        $headerCode = trim((string) ($invoice['vat_classification_code'] ?? ''));
+        if ($headerCode !== '') {
+            return false;
+        }
+        $isRc = !empty($invoice['reverse_charge']);
+        foreach ((array) ($invoice['items'] ?? []) as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            if (trim((string) ($item['vat_classification_code'] ?? '')) !== '') {
+                continue;
+            }
+            if ($isRc || (float) ($item['vat_rate_snapshot'] ?? 0) > 0.0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /**
+     * Má dobropis položky obou znamének? Počítá se ze základu položky
+     * (total_without_vat, jinak qty × jednotková cena) — nulové řádky ignorujeme.
+     *
+     * @param array<string,mixed> $invoice řádek dokladu vč. klíče `items`
+     */
+    private static function hasMixedSignItems(array $invoice): bool
+    {
+        $positive = false;
+        $negative = false;
+        foreach ((array) ($invoice['items'] ?? []) as $item) {
+            if (!is_array($item)) {
+                continue;
+            }
+            $base = array_key_exists('total_without_vat', $item)
+                ? (float) $item['total_without_vat']
+                : (float) ($item['quantity'] ?? 0) * (float) ($item['unit_price_without_vat'] ?? 0);
+            if ($base > 0.005) {
+                $positive = true;
+            } elseif ($base < -0.005) {
+                $negative = true;
+            }
+        }
+        return $positive && $negative;
     }
 
     private static function isValidDate(string $date): bool

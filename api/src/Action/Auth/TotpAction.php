@@ -14,8 +14,13 @@ use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\Auth\SecretEncryption;
+use MyInvoice\Service\Auth\MfaPolicyService;
+use MyInvoice\Service\Auth\SessionAuthContext;
+use MyInvoice\Service\Auth\SessionCookieFactory;
+use MyInvoice\Service\Auth\SessionManager;
 use MyInvoice\Service\Auth\TotpService;
 use MyInvoice\Service\IpMatcher;
+use Psr\Clock\ClockInterface;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
 
@@ -36,6 +41,10 @@ final class TotpAction
         private readonly ActivityLogger $logger,
         private readonly IpMatcher $ipMatcher,
         private readonly SecretEncryption $crypto,
+        private readonly MfaPolicyService $mfaPolicy,
+        private readonly SessionManager $sessions,
+        private readonly SessionCookieFactory $sessionCookies,
+        private readonly ClockInterface $clock,
     ) {}
 
     public function status(Request $request, Response $response): Response
@@ -52,6 +61,9 @@ final class TotpAction
     {
         $user = $this->user($request);
         if ($user === null) return Json::error($response, 'unauthenticated', 'Nepřihlášený uživatel.', 401);
+        if (!$this->mfaPolicy->isMethodAllowed('totp')) {
+            return Json::error($response, 'mfa_method_not_allowed', 'TOTP není v této instalaci povolené.', 403);
+        }
 
         // Nový secret pokaždé — pokud už totp_enabled=1, vrať 409 (reset přes CLI)
         if ((int) $user['totp_enabled'] === 1) {
@@ -93,6 +105,9 @@ final class TotpAction
     {
         $user = $this->user($request);
         if ($user === null) return Json::error($response, 'unauthenticated', 'Nepřihlášený uživatel.', 401);
+        if (!$this->mfaPolicy->isMethodAllowed('totp')) {
+            return Json::error($response, 'mfa_method_not_allowed', 'TOTP není v této instalaci povolené.', 403);
+        }
 
         $body = (array) ($request->getParsedBody() ?? []);
         $code = trim((string) ($body['code'] ?? ''));
@@ -117,9 +132,37 @@ final class TotpAction
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
         $this->logger->log('auth.totp_enabled', (int) $user['id'], 'user', (int) $user['id'], null, $ip, $request->getHeaderLine('User-Agent'));
 
-        return Json::ok($response, ['enabled' => true]);
+        $session = $request->getAttribute(AuthMiddleware::ATTR_SESSION);
+        if (!is_array($session) || ($session['assurance_level'] ?? 'legacy') !== 'setup') {
+            return Json::ok($response, ['enabled' => true]);
+        }
+        $token = (string) $request->getAttribute(AuthMiddleware::ATTR_TOKEN, '');
+        try {
+            $completed = $this->sessions->completeSetup(
+                (int) $user['id'],
+                $token,
+                $ip,
+                $request->getHeaderLine('User-Agent'),
+                SessionAuthContext::strong('totp', $this->clock->now()),
+            );
+        } catch (\DomainException) {
+            return Json::error($response, 'session_expired', 'Setup session vypršela.', 401);
+        }
+
+        return Json::ok($response, [
+            'enabled' => true,
+            'csrf_token' => $completed['csrf_token'],
+            'session_state' => 'active',
+            'must_setup_mfa' => false,
+        ])->withHeader('Set-Cookie', $this->sessionCookies->create(
+            $completed['token'],
+            $completed['expires_at'],
+        ));
     }
 
+    /**
+     * @return array<string,mixed>|null
+     */
     private function user(Request $request): ?array
     {
         $u = (array) $request->getAttribute(AuthMiddleware::ATTR_USER, []);

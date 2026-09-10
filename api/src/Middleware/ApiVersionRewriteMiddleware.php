@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace MyInvoice\Middleware;
 
+use MyInvoice\Http\Json;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
 use Psr\Http\Server\MiddlewareInterface;
 use Psr\Http\Server\RequestHandlerInterface as Handler;
+use Slim\Psr7\Response as SlimResponse;
 
 /**
  * Veřejná verze API se servíruje pod `/api/v1/...`. Interní SPA volá `/api/...`
@@ -27,6 +29,15 @@ final class ApiVersionRewriteMiddleware implements MiddlewareInterface
     {
         $uri = $request->getUri();
         $path = $uri->getPath();
+
+        if (preg_match('#^/api/v1/auth/(webauthn|mfa|session)(/|$)#', $path) === 1) {
+            return Json::error(
+                new SlimResponse(404),
+                'not_found',
+                'Tento interní endpoint není součástí veřejného API.',
+                404,
+            )->withHeader('X-API-Version', '1');
+        }
 
         if (str_starts_with($path, '/api/v1/') || $path === '/api/v1') {
             $newPath = $path === '/api/v1' ? '/api' : '/api' . substr($path, 7);

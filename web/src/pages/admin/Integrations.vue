@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref, onMounted, onUnmounted, computed, watch } from 'vue'
+import { ref, onMounted, computed, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { integrationsApi,
   type IdokladCredentialsStatus, type FakturoidCredentialsStatus,
@@ -8,6 +8,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { useToast } from '@/composables/useToast'
 import { apiErrorMessage } from '@/api/errors'
 import { purchaseInvoicesApi, type PurchaseDocumentKind } from '@/api/purchaseInvoices'
+import { useSessionAwarePolling } from '@/composables/useSessionAwarePolling'
 
 const { t } = useI18n()
 const toast = useToast()
@@ -92,7 +93,8 @@ const startParams = ref({
 })
 const currentJob = ref<ImportJob | null>(null)
 const starting = ref(false)
-let pollTimer: ReturnType<typeof setInterval> | null = null
+const polledJobId = ref<number | null>(null)
+const jobPollingEnabled = ref(false)
 
 async function startImport() {
   if (starting.value) return
@@ -100,7 +102,7 @@ async function startImport() {
   try {
     const r = await integrationsApi.startIdoklad(startParams.value)
     toast.success(t('integrations.idoklad.started', { jobId: r.job_id }))
-    await pollJob(r.job_id)
+    pollJob(r.job_id)
   } catch (e: any) {
     toast.error(apiErrorMessage(e))
   } finally {
@@ -108,25 +110,18 @@ async function startImport() {
   }
 }
 
-async function pollJob(jobId: number) {
-  // Initial fetch
-  currentJob.value = await integrationsApi.getJob(jobId)
-  if (pollTimer) clearInterval(pollTimer)
-  // Poll každé 2s dokud queued/running
-  pollTimer = setInterval(async () => {
-    if (!currentJob.value) return
-    try {
-      currentJob.value = await integrationsApi.getJob(jobId)
-      if (['completed', 'failed', 'cancelled'].includes(currentJob.value.status)) {
-        if (pollTimer) clearInterval(pollTimer)
-        pollTimer = null
-      }
-    } catch (e) {
-      if (pollTimer) clearInterval(pollTimer)
-      pollTimer = null
-    }
-  }, 2000)
+function pollJob(jobId: number) {
+  polledJobId.value = jobId
+  jobPollingEnabled.value = true
 }
+
+async function refreshJob(signal: AbortSignal) {
+  if (polledJobId.value === null) return
+  currentJob.value = await integrationsApi.getJob(polledJobId.value, signal)
+  jobPollingEnabled.value = ['queued', 'running'].includes(currentJob.value.status)
+}
+
+useSessionAwarePolling(refreshJob, 2000, jobPollingEnabled)
 
 async function cancelImport() {
   if (!currentJob.value) return
@@ -144,7 +139,8 @@ async function deleteImport() {
   if (!confirm(t('integrations.idoklad.delete_confirm'))) return
   try {
     await integrationsApi.deleteJob(currentJob.value.id)
-    if (pollTimer) { clearInterval(pollTimer); pollTimer = null }
+    jobPollingEnabled.value = false
+    polledJobId.value = null
     currentJob.value = null
     toast.success(t('integrations.idoklad.deleted'))
   } catch (e) {
@@ -262,7 +258,7 @@ async function startFakImport() {
   try {
     const r = await integrationsApi.startFakturoid(fakStartParams.value)
     toast.success(t('integrations.idoklad.started', { jobId: r.job_id }))
-    await pollJob(r.job_id)
+    pollJob(r.job_id)
   } catch (e: any) {
     toast.error(apiErrorMessage(e))
   } finally {
@@ -497,9 +493,6 @@ onMounted(() => {
   loadAiStatus()
 })
 
-onUnmounted(() => {
-  if (pollTimer) clearInterval(pollTimer)
-})
 </script>
 
 <template>

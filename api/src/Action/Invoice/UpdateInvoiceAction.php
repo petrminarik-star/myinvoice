@@ -53,9 +53,16 @@ final class UpdateInvoiceAction
         $isAdmin = (($user['role'] ?? '') === 'admin');
 
         if ($existing['status'] !== 'draft') {
-            // Pouze admin smí upravovat vystavenou fakturu, a to jen s explicit ?force=1.
-            if (!$isAdmin || !$isForce) {
-                return Json::error($response, 'not_editable', 'Vystavenou fakturu nelze editovat.', 409);
+            // Pouze admin smí upravovat vystavenou fakturu, a to jen s explicit ?force=1
+            // (UI: tlačítko „Odemknout k editaci" v editoru → potvrzovací modal).
+            // Bez force → 409 s návodem; force bez admin role → 403 (rozlišeno pro UI i testy).
+            if (!$isForce) {
+                return Json::error($response, 'not_editable',
+                    'Vystavenou fakturu nelze upravit. Administrátor ji může odemknout k editaci přímo v editoru dokladu (tlačítko „Odemknout k editaci").', 409);
+            }
+            if (!$isAdmin) {
+                return Json::error($response, 'forbidden',
+                    'Odemknout a upravit vystavenou fakturu smí jen administrátor.', 403);
             }
             // Cancellation/credit_note jsou implicitně chráněné (auditní stopa)
             if (in_array($existing['invoice_type'], ['cancellation'], true)) {
@@ -221,13 +228,42 @@ final class UpdateInvoiceAction
         }
 
         $ip = $this->ipMatcher->clientIpFromRequest($request->getServerParams());
-        $action = ($existing['status'] !== 'draft') ? 'invoice.force_updated' : 'invoice.updated';
+        // Force-edit vystavené faktury má vlastní typ auditní položky s plným
+        // kontextem: CO se přepsalo (changed) + starý/nový snapshot odběratele
+        // a dodavatele (rebuildSnapshots je při force-editu přepsal z live dat).
+        $isForceEdit = $existing['status'] !== 'draft';
+        if ($isForceEdit) {
+            $payload = ($payload ?? []) + [
+                'old_snapshot' => [
+                    'client'   => self::decodeSnapshot($existing['client_snapshot'] ?? null),
+                    'supplier' => self::decodeSnapshot($existing['supplier_snapshot'] ?? null),
+                ],
+                'new_snapshot' => [
+                    'client'   => self::decodeSnapshot($invoice['client_snapshot'] ?? null),
+                    'supplier' => self::decodeSnapshot($invoice['supplier_snapshot'] ?? null),
+                ],
+            ];
+        }
+        $action = $isForceEdit ? 'invoice.force_edit' : 'invoice.updated';
         $this->logger->log($action, $user['id'] ?? null, 'invoice', $id, $payload, $ip, $request->getHeaderLine('User-Agent'));
 
         if ($rateMeta !== null) {
             $invoice['_meta'] = ['exchange_rate' => $rateMeta];
         }
         return Json::ok($response, $invoice);
+    }
+
+    /** JSON snapshot (string z DB) → pole pro auditní payload; neparsovatelný → null. */
+    private static function decodeSnapshot(mixed $raw): ?array
+    {
+        if (is_array($raw)) {
+            return $raw;
+        }
+        if (!is_string($raw) || $raw === '') {
+            return null;
+        }
+        $decoded = json_decode($raw, true);
+        return is_array($decoded) ? $decoded : null;
     }
 
     /**

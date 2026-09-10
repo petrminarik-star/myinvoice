@@ -109,7 +109,39 @@ CREATE TABLE sessions (
   CONSTRAINT fk_sess_user FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
 ) ENGINE=InnoDB;
 ```
-> Použito jen jako fallback, primárně Redis. Cron každou hodinu maže expirované.
+Migrace `0145_webauthn_passkeys_foundation.sql` rozšiřuje session o autoritativní
+auth/lock kontext: `auth_method`, `assurance_level`, `mfa_verified_at`,
+`auth_credential_id`, `last_user_activity_at`, `locked_at`, `lock_reason`,
+`last_unlock_at`, `last_unlock_method`, `session_family_id`, `generation`,
+`replaced_at` a `revoked_at`. MariaDB je jediná bezpečnostní autorita; Redis
+nevstupuje do autorizace a nesmí obnovit zamčenou, nahrazenou ani odvolanou
+generaci.
+Existující řádky získají při doplnění těchto sloupců hodnotu
+`assurance_level = legacy`. Při povinném MFA se nepovyšují podle nastavení účtu:
+uživatel musí novou strong session získat opětovným přihlášením.
+Cleanup porovnává `TIMESTAMP expires_at` se session-timezone
+`CURRENT_TIMESTAMP`, zatímco UTC `DATETIME(6) revoked_at` porovnává s
+`UTC_TIMESTAMP`. Session odvolané déle než sedm dní smaže. Samotné
+`replaced_at` není důvod k předčasnému smazání: nahrazená generace zůstává
+logout tombstone až do absolutní expirace nebo odvolání celé rodiny.
+
+## 2a. WebAuthn a MFA step-up
+
+Migrace `0145_webauthn_passkeys_foundation.sql` přidává:
+
+- `users.webauthn_user_handle` — náhodný stabilní user handle bez PII,
+- `webauthn_credentials` — credential ID, veřejný klíč, counter, transporty,
+  backup metadata, název a čas vytvoření/použití/odvolání,
+- `webauthn_ceremonies` — hash opaque flow tokenu, challenge, účel, operation,
+  volitelná vazba na user/session, options a jednorázové `used_at`; registrační
+  flow autorizované heslem nebo vyřazovaným TOTP nese interní constraint
+  `first_passkey_only`; discoverable login má vlastní účel a `user_id = NULL`,
+  protože účet určí až ověřená credential spolu s odpovídajícím user handle,
+- `mfa_step_up_proofs` — hash proof tokenu vázaný na user, session, operation,
+  metodu a nejvýše jednu credential.
+
+Raw flow/proof tokeny se do DB neukládají. Expiraci a staré spotřebované řádky
+odstraňuje `api/bin/cron-cleanup.php`.
 
 ## 3. `password_resets`
 

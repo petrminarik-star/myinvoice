@@ -30,6 +30,7 @@ final class AuthMiddleware implements MiddlewareInterface
     public const ATTR_TOKEN      = 'auth.token';
     public const ATTR_API_TOKEN  = 'auth.api_token';
     public const ATTR_METHOD     = 'auth.method'; // 'session' | 'bearer'
+    public const ATTR_LOGOUT_TOMBSTONE = 'auth.logout_tombstone';
 
     private const PUBLIC_PATHS = [
         '/api/health',
@@ -44,8 +45,28 @@ final class AuthMiddleware implements MiddlewareInterface
         '/api/auth/setup-crpdph-lookup',
         '/api/auth/setup-sample',
         '/api/auth/login',
+        '/api/auth/webauthn/login/options',
+        '/api/auth/webauthn/login/verify',
         '/api/auth/forgot',
         '/api/auth/reset',
+    ];
+
+    /**
+     * Zahájení nového přihlášení nesmí zdědit identitu ze staré browserové
+     * session. Jinak legacy session při povinném MFA zastaví request dřív,
+     * než ji může úspěšné přihlášení nahradit strong session.
+     *
+     * @var array<string,list<string>>
+     */
+    private const SESSION_IGNORED_PATHS = [
+        'GET' => [
+            '/api/auth/setup-status',
+        ],
+        'POST' => [
+            '/api/auth/login',
+            '/api/auth/webauthn/login/options',
+            '/api/auth/webauthn/login/verify',
+        ],
     ];
 
     public function __construct(
@@ -99,30 +120,48 @@ final class AuthMiddleware implements MiddlewareInterface
         }
 
         // 2) Session cookie (browser SPA)
+        $method     = strtoupper($request->getMethod());
+        $path       = $request->getUri()->getPath();
         $cookieName = (string) $this->config->get('session.cookie_name', '__Host-myinvoice_session');
         $cookies    = $request->getCookieParams();
-        $token      = (string) ($cookies[$cookieName] ?? '');
+        $token      = self::isAllowed($method, $path, self::SESSION_IGNORED_PATHS)
+            ? ''
+            : (string) ($cookies[$cookieName] ?? '');
+        $isLogout   = $method === 'POST' && $path === '/api/auth/logout';
 
-        $session = $token !== '' ? $this->sessions->load($token) : null;
+        $authentication = $token !== ''
+            ? $this->sessions->loadAuthenticationContext($token)
+            : null;
+        $session = $authentication['session'] ?? null;
+        $user = $authentication['user'] ?? null;
+        $logoutTombstone = false;
+        if ($session === null && $token !== '' && $isLogout) {
+            $session = $this->sessions->loadTombstoneForLogout($token);
+            $logoutTombstone = $session !== null;
+            $user = $logoutTombstone
+                ? $this->loadUser((int) $session['user_id'])
+                : null;
+        }
 
         if ($session !== null) {
-            // Načti aktivního usera
-            $stmt = $this->db->pdo()->prepare('SELECT id, email, name, role, locale, is_active, totp_enabled FROM users WHERE id = ?');
-            $stmt->execute([$session['user_id']]);
-            $user = $stmt->fetch(\PDO::FETCH_ASSOC);
-
-            if ($user && (int) $user['is_active'] === 1) {
-                $user['id']           = (int) $user['id'];
-                $user['is_active']    = (bool) $user['is_active'];
-                $user['totp_enabled'] = (int) ($user['totp_enabled'] ?? 0) === 1;
+            if (is_array($user) && $user['is_active'] === true) {
                 Locale::set((string) ($user['locale'] ?? 'cs'));
                 $request = $request
                     ->withAttribute(self::ATTR_USER, $user)
                     ->withAttribute(self::ATTR_SESSION, $session)
                     ->withAttribute(self::ATTR_TOKEN, $token)
                     ->withAttribute(self::ATTR_METHOD, 'session');
+                if ($logoutTombstone) {
+                    $request = $request->withAttribute(self::ATTR_LOGOUT_TOMBSTONE, true);
+                }
 
-                $this->sessions->touch($token);
+                if (!$logoutTombstone) {
+                    $this->sessions->touchIfStale(
+                        $token,
+                        (int) ($session['last_seen'] ?? 0),
+                        (int) ($session['evaluated_at_epoch'] ?? 0),
+                    );
+                }
             } else {
                 // User smazán/deaktivován — invaliduj session
                 $this->sessions->destroy($token);
@@ -130,7 +169,6 @@ final class AuthMiddleware implements MiddlewareInterface
             }
         }
 
-        $path = $request->getUri()->getPath();
         if (in_array($path, self::PUBLIC_PATHS, true)
             || str_starts_with($path, '/api/public/')
         ) {
@@ -143,6 +181,35 @@ final class AuthMiddleware implements MiddlewareInterface
         }
 
         return $handler->handle($request);
+    }
+
+    /**
+     * Tombstone se načítá jen při opakovaném logoutu. Běžná autorizace získá
+     * uživatele společně se session v SessionManageru.
+     *
+     * @return array<string,mixed>|null
+     */
+    private function loadUser(int $userId): ?array
+    {
+        $stmt = $this->db->pdo()->prepare(
+            'SELECT id, email, name, role, locale, is_active, totp_enabled,
+                    session_lock_after_minutes
+               FROM users
+              WHERE id = ?'
+        );
+        $stmt->execute([$userId]);
+        $user = $stmt->fetch(\PDO::FETCH_ASSOC);
+        if ($user === false) {
+            return null;
+        }
+
+        $user['id'] = (int) $user['id'];
+        $user['is_active'] = (int) $user['is_active'] === 1;
+        $user['totp_enabled'] = (int) ($user['totp_enabled'] ?? 0) === 1;
+        $user['session_lock_after_minutes'] = $user['session_lock_after_minutes'] !== null
+            ? (int) $user['session_lock_after_minutes']
+            : null;
+        return $user;
     }
 
     /**
@@ -177,5 +244,13 @@ final class AuthMiddleware implements MiddlewareInterface
             return 'cs';
         }
         return $best['lang'];
+    }
+
+    /**
+     * @param array<string,list<string>> $allowlist
+     */
+    private static function isAllowed(string $method, string $path, array $allowlist): bool
+    {
+        return in_array($path, $allowlist[$method] ?? [], true);
     }
 }

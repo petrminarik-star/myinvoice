@@ -10,6 +10,10 @@ use MyInvoice\Infrastructure\Config\Config;
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\Auth\PasswordHasher;
+use MyInvoice\Service\Auth\MfaPolicyService;
+use MyInvoice\Service\Auth\SessionAuthContext;
+use MyInvoice\Service\Auth\SessionCookieFactory;
+use MyInvoice\Service\Auth\WebAuthnConfig;
 use MyInvoice\Service\Ares\SupplierRegistryEnricher;
 use MyInvoice\Service\Auth\SessionManager;
 use MyInvoice\Service\Config\CfgLocalWriter;
@@ -30,6 +34,7 @@ final class SetupAction
         private readonly SessionManager $sessions,
         private readonly Config $config,
         private readonly SupplierRegistryEnricher $enricher,
+        private readonly SessionCookieFactory $sessionCookies,
     ) {}
 
     public function __invoke(Request $request, Response $response): Response
@@ -38,6 +43,49 @@ final class SetupAction
         $admin = (array) ($body['admin'] ?? []);
         $supplier = isset($body['supplier']) && is_array($body['supplier']) ? $body['supplier'] : null;
         $requireTotp = !empty($body['require_totp']);
+        if (array_key_exists('require_mfa', $body) && !is_bool($body['require_mfa'])) {
+            return Json::error($response, 'validation_failed', 'require_mfa musí být boolean.', 400);
+        }
+        $usesLegacyRequest = !array_key_exists('require_mfa', $body);
+        $requireMfa = $usesLegacyRequest ? $requireTotp : (bool) $body['require_mfa'];
+        $methodsProvided = array_key_exists('allowed_mfa_methods', $body);
+        // Když volající seznam neposlal, platí to, co je v configu — ne domněnka
+        // wizardu. Odpověď pak nese reálnou politiku, kterou vzápětí potvrdí /me.
+        $methods = $methodsProvided
+            ? $body['allowed_mfa_methods']
+            : ($usesLegacyRequest
+                ? ['totp']
+                : $this->config->get('auth.allowed_mfa_methods', ['passkey', 'totp']));
+        try {
+            // Striktně — vstup z wizardu musí chybu vidět, runtime politika je
+            // naopak fail-soft, aby překlep v cfg neshodil celou aplikaci.
+            $allowedMfaMethods = MfaPolicyService::validateMethods($methods);
+        } catch (\InvalidArgumentException $e) {
+            if ($methodsProvided || $usesLegacyRequest) {
+                return Json::error($response, 'validation_failed', $e->getMessage(), 400);
+            }
+            // Překlep v cfg.php nesmí zablokovat první spuštění; stejný fail-soft
+            // fallback jako v MfaPolicyService.
+            $allowedMfaMethods = ['passkey', 'totp'];
+        }
+
+        $detectedUrl = $this->detectAppUrl($request);
+        $willWriteDetectedUrl = $detectedUrl !== null && $this->shouldOverwriteAppUrl();
+        if ($requireMfa && $allowedMfaMethods === ['passkey']) {
+            $canonicalUrl = $willWriteDetectedUrl
+                ? $detectedUrl
+                : (string) $this->config->get('app.url', '');
+            try {
+                new WebAuthnConfig(new Config(['app' => ['url' => $canonicalUrl]]));
+            } catch (\InvalidArgumentException $e) {
+                return Json::error(
+                    $response,
+                    'webauthn_configuration_invalid',
+                    $e->getMessage(),
+                    400,
+                );
+            }
+        }
 
         $errors = $this->validate($admin, $supplier);
         if (!empty($errors)) {
@@ -60,7 +108,7 @@ final class SetupAction
         // se serializují, druhý vidí prvního usera a odmítne setup.
         $pdo->beginTransaction();
         try {
-            $count = (int) $pdo->query('SELECT COUNT(*) FROM users FOR UPDATE')->fetchColumn();
+            $count = (int) self::queryScalar($pdo, 'SELECT COUNT(*) FROM users FOR UPDATE');
             if ($count > 0) {
                 $pdo->rollBack();
                 return Json::error($response, 'setup_already_done', 'Setup již proběhl.', 409);
@@ -84,6 +132,8 @@ final class SetupAction
                 'email' => $admin['email'],
                 'has_supplier' => $supplier !== null,
                 'require_totp' => $requireTotp,
+                'require_mfa' => $requireMfa,
+                'allowed_mfa_methods' => $allowedMfaMethods,
             ], $ip, $request->getHeaderLine('User-Agent'));
 
             $pdo->commit();
@@ -98,16 +148,24 @@ final class SetupAction
             $this->enricher->enrich($createdSupplierId, $supplier['ic'] ?? null, $supplier['dic'] ?? null);
         }
 
-        // Zapiš auth.require_totp + (volitelně) detekované app.url do cfg.local.php.
-        // Píšeme `auth.require_totp` VŽDY (i false), aby stará hodnota z předchozího setupu nepřevažovala.
+        // Zapiš obecnou MFA politiku, legacy TOTP flag a případně detekované app.url.
         // `app.url` přepisujeme JEN pokud je v configu prázdné nebo některý ze známých
         // placeholderů (Docker `http://localhost:8080`, sample `https://dev.example.com`, `https://example.com`).
         // To umožní dokončit Docker setup z LAN IP a zároveň ušetří uživateli krok ruční konfigurace
         // (důležité pro reset hesla / schvalovací odkazy v emailech).
         // Pokud uživatel app.url už nastavil přes MYINVOICE_APP_URL env nebo cfg.php, neperepíšeme.
-        $keysToWrite = ['auth.require_totp' => $requireTotp];
-        $detectedUrl = $this->detectAppUrl($request);
-        if ($detectedUrl !== null && $this->shouldOverwriteAppUrl()) {
+        // `auth.allowed_mfa_methods` zapisujeme jen když ho volající vážně poslal
+        // (nebo jde o legacy tvar požadavku, kde je seznam odvozený z require_totp).
+        // Wizard ho záměrně neposílá — ať zůstane platná hodnota z cfg.php a per-instance
+        // override nevznikne omylem.
+        $keysToWrite = [
+            'auth.require_mfa' => $requireMfa,
+            'auth.require_totp' => $requireTotp,
+        ];
+        if ($methodsProvided || $usesLegacyRequest) {
+            $keysToWrite['auth.allowed_mfa_methods'] = $allowedMfaMethods;
+        }
+        if ($willWriteDetectedUrl) {
             $keysToWrite['app.url'] = $detectedUrl;
         }
         $cfgLocalWritten = false;
@@ -124,36 +182,42 @@ final class SetupAction
 
         // Auto-login: vytvoř session pro nově vzniknklého admina (eliminuje public window pro setup-sample)
         $userAgent = $request->getHeaderLine('User-Agent');
-        $session = $this->sessions->create($userId, $ip, $userAgent);
-
-        $cookieName     = (string) $this->config->get('session.cookie_name', '__Host-myinvoice_session');
-        $cookieSecure   = (bool)   $this->config->get('session.cookie_secure', true);
-        $cookieSameSite = (string) $this->config->get('session.cookie_samesite', 'Lax');
-        $maxAge = max(0, $session['expires_at'] - time());
-        $cookie = sprintf(
-            '%s=%s; HttpOnly; Path=/; Max-Age=%d; SameSite=%s%s',
-            $cookieName,
-            $session['token'],
-            $maxAge,
-            $cookieSameSite,
-            $cookieSecure ? '; Secure' : '',
+        $session = $this->sessions->create(
+            $userId,
+            $ip,
+            $userAgent,
+            $requireMfa ? SessionAuthContext::setup('password') : SessionAuthContext::basic('password'),
         );
 
-        $response = $response->withHeader('Set-Cookie', $cookie);
+        $response = $response->withHeader(
+            'Set-Cookie',
+            $this->sessionCookies->create($session['token'], $session['expires_at']),
+        );
         return Json::ok($response, [
             'user' => [
                 'id'    => $userId,
                 'email' => $admin['email'],
                 'name'  => $admin['name'],
                 'role'  => 'admin',
+                'totp_enabled' => false,
+                'must_setup_totp' => $requireTotp,
+                'mfa_enabled' => false,
+                'mfa_methods' => [],
+                'passkey_count' => 0,
+                'must_setup_mfa' => $requireMfa,
             ],
             'csrf_token' => $session['csrf_token'],
-            'next' => $requireTotp ? '/setup-totp' : '/login',
+            'next' => $requireMfa ? '/setup-mfa' : '/',
             'require_totp' => $requireTotp,
+            'require_mfa' => $requireMfa,
+            'allowed_mfa_methods' => $allowedMfaMethods,
             'cfg_local_written' => $cfgLocalWritten,
         ], 201);
     }
 
+    /**
+     * @param array<string,mixed> $supplier
+     */
     private function insertSupplier(\PDO $pdo, array $supplier): int
     {
         // Najdi country_id z iso2
@@ -162,12 +226,14 @@ final class SetupAction
         $stmtCountry->execute([$iso2]);
         $countryId = (int) ($stmtCountry->fetchColumn() ?: 0);
         if ($countryId === 0) {
-            $countryId = (int) $pdo->query("SELECT id FROM countries WHERE iso2 = 'CZ'")->fetchColumn();
+            $countryId = (int) self::queryScalar($pdo, "SELECT id FROM countries WHERE iso2 = 'CZ'");
         }
 
         $defaultCurrencyCode = strtoupper((string) ($supplier['default_currency'] ?? 'CZK'));
-        $vatRateId = (int) $pdo->query("SELECT id FROM vat_rates WHERE is_default = 1 ORDER BY id LIMIT 1")->fetchColumn()
-            ?: (int) $pdo->query("SELECT id FROM vat_rates ORDER BY id LIMIT 1")->fetchColumn();
+        $vatRateId = (int) self::queryScalar(
+            $pdo,
+            'SELECT id FROM vat_rates WHERE is_default = 1 ORDER BY id LIMIT 1',
+        ) ?: (int) self::queryScalar($pdo, 'SELECT id FROM vat_rates ORDER BY id LIMIT 1');
         if ($vatRateId === 0) {
             throw new \RuntimeException('Tabulka vat_rates je prázdná.');
         }
@@ -294,6 +360,11 @@ final class SetupAction
         return in_array($current, $placeholders, true);
     }
 
+    /**
+     * @param array<string,mixed> $admin
+     * @param array<string,mixed>|null $supplier
+     * @return array<string,list<string>>
+     */
     private function validate(array $admin, ?array $supplier): array
     {
         $errors = [];
@@ -321,5 +392,14 @@ final class SetupAction
         }
 
         return $errors;
+    }
+
+    private static function queryScalar(\PDO $pdo, string $sql): mixed
+    {
+        $statement = $pdo->query($sql);
+        if ($statement === false) {
+            throw new \RuntimeException('Setup dotaz se nepodařilo provést.');
+        }
+        return $statement->fetchColumn();
     }
 }

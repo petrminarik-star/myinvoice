@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, watch } from 'vue'
+import DateInput from '@/components/ui/DateInput.vue'
+import { RouterLink } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { reportsApi, type DphPriznaniPreview, type DphSettings, type DphTrendRow, type DphDraftsPrediction } from '@/api/reports'
 import { apiErrorMessage } from '@/api/errors'
@@ -18,6 +20,10 @@ const trend = ref<DphTrendRow[]>([])
 const draftsPrediction = ref<DphDraftsPrediction | null>(null)
 const loading = ref(false)
 const error = ref('')
+// Chybějící povinná pole EPO identifikace (BUG 6) — chodí v těle náhledu.
+// Náhled se kvůli nim NEBLOKUJE, jen se nad ním vykreslí výzva a zakáže se
+// stažení XML (které by portál stejně odmítl).
+const epoMissing = ref<Array<{ field: string; label: string; why: string }> | null>(null)
 
 // Period override (jinak default ze settings.vat_period)
 const periodOverride = ref<'monthly' | 'quarterly' | ''>('')
@@ -34,6 +40,7 @@ const currentQuarter = computed(() => Math.ceil(month.value / 3))
 async function loadAll() {
   loading.value = true
   error.value = ''
+  epoMissing.value = null
   try {
     const [s, p, tr, dp] = await Promise.all([
       reportsApi.dphSettings(),
@@ -45,16 +52,29 @@ async function loadAll() {
     preview.value = p
     trend.value = tr
     draftsPrediction.value = dp
+    epoMissing.value = p.missing ?? null
   } catch (e) {
+    epoMissing.value = null
     error.value = apiErrorMessage(e)
   } finally {
     loading.value = false
   }
 }
 
+// Forma podání: B řádné / O opravné (§ 138 DŘ). Dodatečné (D, § 141 DŘ)
+// nenabízíme: podává se v rozdílech proti poslední známé dani a dopočet
+// rozdílů zatím není implementován — backend formu D/E odmítá (400).
+const form = ref<'B' | 'O'>('B')
+const dZjist = ref('') // ISO (YYYY-MM-DD) z <input type="date">, u O volitelné
+const dZjistEpo = computed(() => {
+  if (!dZjist.value) return ''
+  const [y, m, d] = dZjist.value.split('-')
+  return `${d}.${m}.${y}` // EPO formát DD.MM.YYYY
+})
+
 function downloadXml() {
   if (!preview.value) return
-  window.open(reportsApi.dphDownloadUrl(year.value, month.value, periodOverride.value || undefined), '_blank')
+  window.open(reportsApi.dphDownloadUrl(year.value, month.value, periodOverride.value || undefined, form.value, dZjistEpo.value), '_blank')
 }
 
 const monthOptions = computed(() =>
@@ -171,12 +191,39 @@ onMounted(loadAll)
         <select v-model.number="year" class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
           <option v-for="y in yearOptions" :key="y" :value="y">{{ y }}</option>
         </select>
-        <button type="button" @click="downloadXml" :disabled="loading || !preview"
+        <!-- Forma přiznání (řádné/opravné) + volitelné datum zjištění důvodů u opravného.
+             Dodatečné (D) nenabízíme — § 141/2 DŘ vyžaduje rozdíly, viz komentář u `form`. -->
+        <select v-model="form" :title="t('reports.form.label')"
+          class="h-9 px-3 border border-neutral-300 rounded-md bg-surface text-sm">
+          <option value="B">{{ t('reports.form.b') }}</option>
+          <option value="O">{{ t('reports.form.o') }}</option>
+        </select>
+        <label v-if="form !== 'B'" class="inline-flex items-center gap-1.5 text-sm text-neutral-600">
+          <span>{{ t('reports.form.d_zjist') }}</span>
+          <DateInput v-model="dZjist"
+            class="h-9 px-2 border border-neutral-300 rounded-md bg-surface text-sm" />
+        </label>
+        <!-- Stažení XML blokujeme jen při chybějících POVINNÝCH polích identifikace —
+             download vrací 422 a window.open by otevřel záložku se syrovým JSON. -->
+        <button type="button" @click="downloadXml" :disabled="loading || !preview || !!epoMissing?.length"
           class="cursor-pointer h-9 px-4 bg-primary-600 hover:bg-primary-700 disabled:bg-neutral-300 text-white text-sm font-medium rounded-md inline-flex items-center gap-1.5">
           <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
           {{ t('reports.dph.download_xml') }}
         </button>
       </div>
+    </div>
+
+    <!-- Nekompletní EPO identifikace — kreslí se NAD náhledem, náhled zůstává
+         viditelný (blokované je jen stažení XML, které by portál odmítl). -->
+    <div v-if="epoMissing?.length" class="bg-danger-50 border-2 border-danger-500 rounded-lg p-4">
+      <p class="font-semibold text-danger-700 mb-1">{{ t('reports.epo.incomplete_title') }}</p>
+      <p class="text-sm text-danger-700 mb-2">{{ t('reports.epo.incomplete_body') }}</p>
+      <ul class="text-sm text-danger-700 list-disc list-inside space-y-0.5">
+        <li v-for="m in epoMissing" :key="m.field"><strong>{{ m.label }}</strong> — {{ m.why }}</li>
+      </ul>
+      <RouterLink to="/admin/settings#epo" class="inline-flex items-center gap-1 mt-3 text-sm font-medium text-primary-700 hover:underline">
+        {{ t('reports.epo.open_settings') }} →
+      </RouterLink>
     </div>
 
     <div v-if="loading" class="bg-surface border border-neutral-200 rounded-lg shadow-sm p-8 text-center text-neutral-400">

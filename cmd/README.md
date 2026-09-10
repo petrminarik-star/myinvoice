@@ -33,6 +33,17 @@ WinRAR / `unzip -P` — vestavěný Průzkumník Windows AES-256 archivy neotev�
 Pokud je heslo nastavené a PHP ext-zip AES nepodporuje (libzip < 1.2), záloha
 se záměrně nevytvoří a úloha skončí chybou (vidět v **Systém → Plánované úlohy**).
 
+### Údržba číselníků — spouští se ručně
+
+| Skript | Co dělá |
+|---|---|
+| `download-okec.{cmd,sh}` | Aktualizuje snapshot číselníku ČINNOSTI (CZ-NACE / `c_okec`) v `api/resources/ciselniky/okec.txt` z rozhraní číselníků Daňového portálu. Proti němu jede kanonizace CZ-NACE v přiznání k DPH a našeptávač v **Nastavení → Daňové nastavení**. |
+
+**Není to cron úloha** — číselník se mění zřídka (poslední velká změna: přechod
+na NACE rev. 2.1 k 1. 1. 2026). Pouštěj ručně, `--dry-run` napřed jen porovná
+a vypíše rozdíl; výsledek zkontroluj přes `git diff` a commitni. Zastaralý
+snapshot nic neblokuje — kód mimo něj se uloží i odešle, jen s upozorněním.
+
 ### Docker — vývoj v kontejnerech
 
 | Skript | Co dělá |
@@ -183,7 +194,7 @@ a `cfg.docker.php` přeskočí). Po dokončení běží aplikace na
 
 ```bash
 cmd/docker-build.sh --no-cache    # po změnách v Dockerfile / composer.json / pnpm-lock.yaml
-cmd/docker-build.sh --pull        # pull nových verzí base images (php:8.5-apache, mariadb:11)
+cmd/docker-build.sh --pull        # pull nových verzí base images (php:8.5-apache, mariadb:11.8)
 ```
 
 ### One-click instalace z GHCR (bez local buildu)

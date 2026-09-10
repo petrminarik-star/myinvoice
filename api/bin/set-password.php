@@ -79,7 +79,7 @@ try {
 $pdo->prepare('UPDATE users SET password_hash = ? WHERE id = ?')
     ->execute([$hash, (int) $user['id']]);
 
-// Invaliduj všechny aktivní sessions (Redis + DB) — force re-login
+// Invaliduj všechny aktivní sessions v autoritativní DB — force re-login
 $killed = $sessions->destroyAllForUser((int) $user['id']);
 
 echo "✓ Heslo nastaveno pro {$user['email']} (id={$user['id']}). Invalidováno $killed session(í).\n";

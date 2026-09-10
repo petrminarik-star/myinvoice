@@ -71,6 +71,12 @@ services:
       MYINVOICE_SESSION_COOKIE_SECURE: ${MYINVOICE_SESSION_COOKIE_SECURE:-false}
       MYINVOICE_SESSION_COOKIE_NAME: ${MYINVOICE_SESSION_COOKIE_NAME:-myinvoice_session}
 
+      # MFA, passwordless login a zámek session (volitelné).
+      MYINVOICE_AUTH_REQUIRE_MFA: ${MYINVOICE_AUTH_REQUIRE_MFA:-}
+      MYINVOICE_AUTH_MFA_METHODS: ${MYINVOICE_AUTH_MFA_METHODS:-}
+      MYINVOICE_AUTH_PASSWORDLESS_LOGIN: ${MYINVOICE_AUTH_PASSWORDLESS_LOGIN:-}
+      MYINVOICE_SESSION_LOCK_AFTER_MINUTES: ${MYINVOICE_SESSION_LOCK_AFTER_MINUTES:-}
+
       # SMTP (volitelné — lze nechat prázdné a doplnit v Nastavení). Prázdné klíče
       # se v Configu ignorují, takže nepřebijí pozdější nastavení ze setup wizardu.
       MYINVOICE_SMTP_HOST: ${MYINVOICE_SMTP_HOST:-}
@@ -83,12 +89,15 @@ services:
       MYINVOICE_SMTP_FROM_NAME: ${MYINVOICE_SMTP_FROM_NAME:-}
 
   db:
-    image: mariadb:11
+    image: mariadb:11.8
     restart: unless-stopped
     command:
       - --performance-schema=OFF
       - --innodb-buffer-pool-size=${DB_INNODB_BUFFER_POOL:-128M}
       - --innodb-log-file-size=${DB_INNODB_LOG_SIZE:-48M}
+      # Default 16 MB nestačí na dump ani obnovu s přílohami do 50 MB
+      # (documents.max_file_bytes) — kontrola prostředí to hlásí jako varování.
+      - --max-allowed-packet=${DB_MAX_ALLOWED_PACKET:-64M}
     environment:
       MARIADB_ROOT_PASSWORD: ${DB_ROOT_PASSWORD:?DB_ROOT_PASSWORD required — openssl rand -base64 28}
       MARIADB_DATABASE: ${DB_NAME:-myinvoice}

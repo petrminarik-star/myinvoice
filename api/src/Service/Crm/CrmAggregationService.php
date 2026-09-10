@@ -978,8 +978,12 @@ final class CrmAggregationService
      *   total: int
      * }
      */
-    public function actionItems(int $supplierId, ?int $userId = null, ?\DateTimeImmutable $now = null): array
-    {
+    public function actionItems(
+        int $supplierId,
+        ?int $userId = null,
+        ?\DateTimeImmutable $now = null,
+        ?string $userRole = null,
+    ): array {
         $items = [];
         $pdo = $this->db->pdo();
         $nowDt = $now ?? new \DateTimeImmutable();
@@ -987,6 +991,21 @@ final class CrmAggregationService
 
         // Load dismissals once
         $dismissals = $this->loadDismissals($supplierId, $userId);
+
+        // 0. Přechod na MyÚčto — nástupce MyInvoice od stejného autora.
+        // Záměrně první: je to nabídka, ne úkol, ale týká se celé instalace
+        // a ostatní položky se objevují a mizí podle dat, takže by se v nich
+        // ztratila. Jen pro admina — /admin/upgrade je adminOnly a komukoliv
+        // jinému by odkaz skončil na redirectu. Zavrhnutelná jako ostatní.
+        if ($userRole === 'admin' && !$this->isFullyDismissed($dismissals, 'myucto_upgrade')) {
+            $items[] = [
+                'type'     => 'myucto_upgrade',
+                'severity' => 'low',
+                'title'    => 'Přejděte zdarma na MyÚčto',
+                'hint'     => 'Nástupce MyInvoice od stejného autora — vše, co znáte, zdarma a s víc funkcemi',
+                'link'     => '/admin/upgrade',
+            ];
+        }
 
         // 1. Overdue vystavené faktury — pošli upomínku.
         // Stejná pohledávková sémantika jako cílový seznam /invoices?overdue=1
@@ -1140,7 +1159,10 @@ final class CrmAggregationService
         // mírně přepomenuty, lze skrýt přes dismiss.
         if (!$this->isFullyDismissed($dismissals, 'shv_deadline')) {
             $now = new \DateTimeImmutable($today);
-            $deadlineDate = sprintf('%04d-%02d-25', (int) $now->format('Y'), (int) $now->format('n'));
+            // § 33/4 DŘ: víkend/svátek → nejbližší následující pracovní den (jako výkazy).
+            $deadlineDate = \MyInvoice\Service\Report\CzechWorkingDays::shiftToWorkingDay(
+                new \DateTimeImmutable(sprintf('%04d-%02d-25', (int) $now->format('Y'), (int) $now->format('n')))
+            )->format('Y-m-d');
             $daysToDeadline = (int) $now->diff(new \DateTimeImmutable($deadlineDate))->format('%r%a');
             if ($daysToDeadline >= -3 && $daysToDeadline <= 7) {
                 $prevMonth = $now->modify('first day of last month');
@@ -1311,6 +1333,11 @@ final class CrmAggregationService
      */
     private function buildDeadlineItem(string $type, string $title, string $deadline, string $link, \DateTimeImmutable $now): ?array
     {
+        // § 33/4 DŘ: 25. na víkend/svátek → posun na nejbližší pracovní den, jinak
+        // dashboard hlásí „po termínu" dřív, než lhůta skutečně uplyne (shodně s výkazy).
+        $deadline = \MyInvoice\Service\Report\CzechWorkingDays::shiftToWorkingDay(
+            new \DateTimeImmutable($deadline)
+        )->format('Y-m-d');
         $days = (int) $now->diff(new \DateTimeImmutable($deadline))->format('%r%a');
         if ($days < -3 || $days > 7) {
             return null;
@@ -1437,7 +1464,8 @@ final class CrmAggregationService
     public function dismissActionItem(int $supplierId, int $userId, string $itemType, string $mode): void
     {
         $validTypes = ['overdue_invoices', 'bank_unmatched', 'recurring_due', 'overdue_payables',
-            'purchase_drafts', 'tax_deadline', 'kh_deadline', 'shv_deadline', 'churn_risk'];
+            'purchase_drafts', 'tax_deadline', 'kh_deadline', 'shv_deadline', 'churn_risk',
+            'myucto_upgrade'];
         $validModes = ['day', 'week', 'forever', 'historical'];
         if (!in_array($itemType, $validTypes, true)) {
             throw new \InvalidArgumentException("Invalid item_type: {$itemType}");

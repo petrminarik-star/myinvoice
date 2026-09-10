@@ -12,6 +12,34 @@ jobs:
     name: Backend (PHP 8.5 + PHPUnit)
     runs-on: ubuntu-latest
 
+    # Bez databáze se přeskočí celá Integration suita včetně testů atomicity
+    # session — tedy zrovna to, co hlídá nejcitlivější garance autentizace.
+    services:
+      mariadb:
+        image: mariadb:11.8
+        env:
+          MARIADB_ROOT_PASSWORD: ci
+          MARIADB_DATABASE: myinvoice_ci
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="healthcheck.sh --connect --innodb_initialized"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+      # Bez Redisu je RateLimitMiddleware záměrně no-op, takže by se neotestoval
+      # ani rate limit, ani brute-force ochrana.
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd="redis-cli ping"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -35,8 +63,59 @@ jobs:
         working-directory: api
         run: composer install --prefer-dist --no-interaction --no-progress
 
+      # cfg.php je gitignored. Používáme stejnou ENV-only cestu jako Docker
+      # deploy (prázdný cfg + MYINVOICE_* override), takže se tu netestuje
+      # jiná konfigurační větev než v produkci.
+      # cfg.php je gitignored, CI si ho generuje. Píšeme ho jako soubor, ne přes
+      # MYINVOICE_* proměnné — ty by prosákly i do unit testů Configu, které
+      # ověřují právě chování ENV override, a rozbily by je.
+      - name: Configure test instance
+        run: |
+          cat > cfg.php <<'PHPCFG'
+          <?php
+          return [
+              'app' => [
+                  'env'   => 'production',
+                  'debug' => false,
+                  'url'   => 'http://localhost:8080',
+                  // Syntetické klíče jen pro běh testů (32 B po dekódování).
+                  'pepper'                => 'Y2ktcGVwcGVyLWZvci10ZXN0cy1vbmx5ISEhISEhISE=',
+                  'secret_encryption_key' => 'Y2ktc2VjcmV0LWtleS1mb3ItdGVzdHMhISEhISEhISE=',
+              ],
+              'db' => [
+                  'host' => '127.0.0.1',
+                  'port' => 3306,
+                  'name' => 'myinvoice_ci',
+                  'user' => 'root',
+                  'pass' => 'ci',
+              ],
+              'redis' => [
+                  'enabled' => true,
+                  'host'    => '127.0.0.1',
+                  'port'    => 6379,
+                  'prefix'  => 'myinvoice:ci:',
+              ],
+              'captcha' => ['provider' => 'none'],
+          ];
+          PHPCFG
+          php api/bin/migrate.php
+          php api/bin/ci-seed.php
+
+      # Část integračních testů mluví na běžící instanci přes HTTP (bearer auth,
+      # rate-limit hlavičky, cross-tenant vazba tokenu). Bez serveru se přeskočí.
+      - name: Start test server
+        run: |
+          php -S 127.0.0.1:8080 api/bin/dev-server-router.php >/tmp/php-server.log 2>&1 &
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:8080/api/health >/dev/null; then exit 0; fi
+            sleep 1
+          done
+          echo "Server se nerozeběhl:"; cat /tmp/php-server.log; exit 1
+
       - name: Run PHPUnit
         working-directory: api
+        env:
+          MYINVOICE_TEST_URL: http://127.0.0.1:8080
         run: vendor/bin/phpunit --no-coverage
 
   frontend:

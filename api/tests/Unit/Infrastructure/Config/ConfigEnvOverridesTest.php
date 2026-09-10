@@ -83,6 +83,15 @@ PHP);
         self::assertSame(3307, $cfg->get('db.port'));
     }
 
+    public function testSessionLockDefaultsToDisabledWithoutExplicitConfiguration(): void
+    {
+        $this->unsetEnv('MYINVOICE_SESSION_LOCK_AFTER_MINUTES');
+
+        $cfg = Config::load($this->tmpDir);
+
+        self::assertSame(0, $cfg->get('session.lock_after_minutes'));
+    }
+
     public function testEmptyEnvDoesNotOverrideConfig(): void
     {
         // Docker Compose dosadí u `KEY: ${VAR}` prázdný řetězec, když VAR
@@ -96,6 +105,49 @@ PHP);
         self::assertSame(3306, $cfg->get('db.port'));
     }
 
+    public function testWebAuthnPolicyEnvironmentOverridesApply(): void
+    {
+        $this->setEnv('MYINVOICE_SESSION_LOCK_AFTER_MINUTES', '30');
+        $this->setEnv('MYINVOICE_AUTH_REQUIRE_MFA', 'true');
+        $this->setEnv('MYINVOICE_AUTH_MFA_METHODS', ' passkey, totp ');
+        $this->setEnv('MYINVOICE_AUTH_PASSWORDLESS_LOGIN', 'true');
+
+        $cfg = Config::load($this->tmpDir);
+
+        self::assertSame(30, $cfg->get('session.lock_after_minutes'));
+        self::assertTrue($cfg->get('auth.require_mfa'));
+        self::assertSame(['passkey', 'totp'], $cfg->get('auth.allowed_mfa_methods'));
+        self::assertTrue($cfg->get('auth.passwordless_login.enabled'));
+    }
+
+    public function testPasswordlessLoginDefaultsToDisabled(): void
+    {
+        $this->unsetEnv('MYINVOICE_AUTH_PASSWORDLESS_LOGIN');
+
+        $cfg = Config::load($this->tmpDir);
+
+        self::assertFalse($cfg->get('auth.passwordless_login.enabled'));
+    }
+
+    public function testInvalidSessionLockEnvironmentOverrideIsPreservedForPolicyValidation(): void
+    {
+        $this->setEnv('MYINVOICE_SESSION_LOCK_AFTER_MINUTES', '15 minutes');
+
+        $cfg = Config::load($this->tmpDir);
+
+        self::assertSame('15 minutes', $cfg->get('session.lock_after_minutes'));
+    }
+
+    public function testOverdueBoundaryDefaultsToTomorrowAndSupportsBooleanEnv(): void
+    {
+        $this->unsetEnv('MYINVOICE_OVERDUE_INCLUDES_TODAY');
+        self::assertFalse(Config::load($this->tmpDir)->get('invoices.overdue_includes_today'));
+        $this->setEnv('MYINVOICE_OVERDUE_INCLUDES_TODAY', 'true');
+        self::assertTrue(Config::load($this->tmpDir)->get('invoices.overdue_includes_today'));
+        $this->setEnv('MYINVOICE_OVERDUE_INCLUDES_TODAY', 'false');
+        self::assertFalse(Config::load($this->tmpDir)->get('invoices.overdue_includes_today'));
+    }
+
     private function setEnv(string $name, string $value): void
     {
         if (!array_key_exists($name, $this->envBackup)) {
@@ -105,5 +157,15 @@ PHP);
         putenv($name . '=' . $value);
         $_ENV[$name] = $value;
         $_SERVER[$name] = $value;
+    }
+
+    private function unsetEnv(string $name): void
+    {
+        if (!array_key_exists($name, $this->envBackup)) {
+            $current = getenv($name);
+            $this->envBackup[$name] = ($current === false) ? false : $current;
+        }
+        putenv($name);
+        unset($_ENV[$name], $_SERVER[$name]);
     }
 }

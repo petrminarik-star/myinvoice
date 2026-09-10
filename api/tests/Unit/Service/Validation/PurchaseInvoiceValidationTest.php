@@ -195,4 +195,62 @@ final class PurchaseInvoiceValidationTest extends TestCase
         $invoice = ['document_kind' => 'invoice', 'total_without_vat' => 1000.0];
         self::assertSame([], PurchaseInvoiceValidation::warnings($invoice));
     }
+
+    public function testCreditNoteWithMixedSignItemsWarns(): void
+    {
+        // Smíšený opravný doklad: vrácené zboží (−1500) + kladný storno poplatek (+500).
+        // Evidence DPH normalizuje KAŽDOU položku přes -ABS(), takže kladný řádek by se
+        // vykázal záporně — uživatel má kladnou část vystavit samostatně.
+        $invoice = [
+            'document_kind'      => 'credit_note',
+            'total_without_vat'  => -1000.0,
+            'items' => [
+                ['total_without_vat' => -1500.0],
+                ['total_without_vat' => 500.0],
+            ],
+        ];
+        self::assertSame(['credit_note_mixed_sign_items'], PurchaseInvoiceValidation::warnings($invoice));
+    }
+
+    public function testCreditNoteWithConsistentlyNegativeItemsHasNoWarning(): void
+    {
+        $invoice = [
+            'document_kind'     => 'credit_note',
+            'total_without_vat' => -2000.0,
+            'items' => [
+                ['total_without_vat' => -1500.0],
+                ['total_without_vat' => -500.0],
+                ['total_without_vat' => 0.0], // nulový řádek se ignoruje
+            ],
+        ];
+        self::assertSame([], PurchaseInvoiceValidation::warnings($invoice));
+    }
+
+    public function testCreditNoteMixedSignFallsBackToQuantityTimesPrice(): void
+    {
+        // Položky bez total_without_vat (payload z importu) — znaménko z qty × ceny.
+        $invoice = [
+            'document_kind'     => 'credit_note',
+            'total_without_vat' => -800.0,
+            'items' => [
+                ['quantity' => -1.0, 'unit_price_without_vat' => 1000.0],
+                ['quantity' => 1.0,  'unit_price_without_vat' => 200.0],
+            ],
+        ];
+        self::assertSame(['credit_note_mixed_sign_items'], PurchaseInvoiceValidation::warnings($invoice));
+    }
+
+    public function testCreditNotePositiveTotalTakesPrecedenceOverMixedSign(): void
+    {
+        // Kladný součet je vážnější (dvojí negace) — hlásíme jen ten, ať se hlášky nebijí.
+        $invoice = [
+            'document_kind'     => 'credit_note',
+            'total_without_vat' => 1000.0,
+            'items' => [
+                ['total_without_vat' => 1500.0],
+                ['total_without_vat' => -500.0],
+            ],
+        ];
+        self::assertSame(['credit_note_positive_total'], PurchaseInvoiceValidation::warnings($invoice));
+    }
 }

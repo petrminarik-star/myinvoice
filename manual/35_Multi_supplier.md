@@ -83,7 +83,9 @@ Každý dodavatel má vlastní:
 
 ## 35.4 Co je sdílené (cross-supplier)
 
-- **Uživatelé + role** — uživatel vidí všechny dodavatele
+- **Uživatelé + role** — uživatel ve výchozím stavu vidí všechny dodavatele;
+  správce ho může omezit na vybrané firmy (a dát mu tam jinou roli) —
+  viz [§ 36.2.3 Přístup k firmám](36_Nastaveni.md#3623-pristup-k-firmam)
 - **Číselníky** (DPH sazby, země) — společné systémové
 - **Activity log** — všechny mutace logované, ale filtrovatelné per dodavatel
 - **IP allowlist + bezpečnostní nastavení** — globální

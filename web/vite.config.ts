@@ -1,6 +1,7 @@
 import { defineConfig, loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
 import tailwindcss from '@tailwindcss/vite'
+import { Features } from 'lightningcss'
 import { fileURLToPath, URL } from 'node:url'
 
 export default defineConfig(({ mode }) => {
@@ -28,6 +29,14 @@ export default defineConfig(({ mode }) => {
     resolve: {
       alias: {
         '@': fileURLToPath(new URL('./src', import.meta.url)),
+      },
+    },
+    css: {
+      transformer: 'lightningcss',
+      lightningcss: {
+        // Tailwind 4 v dev režimu generuje nativně vnořené @media. Některá
+        // Chromium prostředí je nevyhodnotí, proto nesting vždy rozbalíme.
+        include: Features.Nesting,
       },
     },
     server: {

@@ -7,6 +7,7 @@ namespace MyInvoice;
 use DI\ContainerBuilder;
 use MyInvoice\Infrastructure\Cache\RedisFactory;
 use MyInvoice\Infrastructure\Cache\RedisProbe;
+use MyInvoice\Infrastructure\Clock\UtcClock;
 use MyInvoice\Infrastructure\Config\Config;
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Middleware\ApiScopeMiddleware;
@@ -16,12 +17,19 @@ use MyInvoice\Middleware\CsrfMiddleware;
 use MyInvoice\Middleware\FirstRunLockMiddleware;
 use MyInvoice\Middleware\IpAllowlistMiddleware;
 use MyInvoice\Middleware\RateLimitMiddleware;
-use MyInvoice\Middleware\RequireTotpMiddleware;
+use MyInvoice\Middleware\RequireMfaMiddleware;
 use MyInvoice\Middleware\RoleMiddleware;
+use MyInvoice\Middleware\SessionLockMiddleware;
 use MyInvoice\Middleware\SupplierScopeMiddleware;
+use MyInvoice\Middleware\WebAuthnBodyLimitMiddleware;
 use MyInvoice\Service\IpMatcher;
+use MyInvoice\Service\Auth\PasskeyService;
+use MyInvoice\Service\Auth\DatabaseSecurityClock;
+use MyInvoice\Service\Auth\SecurityClock;
+use MyInvoice\Service\Auth\WebAuthnConfigProvider;
 use Monolog\Handler\RotatingFileHandler;
 use Monolog\Logger;
+use Psr\Clock\ClockInterface;
 use Psr\Container\ContainerInterface;
 use Psr\Log\LoggerInterface;
 use Slim\App;
@@ -35,6 +43,7 @@ final class Bootstrap
         return dirname(__DIR__, 2);
     }
 
+    /** @return App<ContainerInterface|null> */
     public static function buildApp(): App
     {
         $rootDir = self::rootDir();
@@ -71,6 +80,8 @@ final class Bootstrap
         $builder->useAttributes(false);
         $builder->addDefinitions([
             Config::class => $config,
+            ClockInterface::class => fn () => new UtcClock(),
+            SecurityClock::class => fn () => new DatabaseSecurityClock(),
 
             LoggerInterface::class => function (ContainerInterface $c) use ($config): LoggerInterface {
                 $logger = new Logger('myinvoice');
@@ -88,6 +99,12 @@ final class Bootstrap
             Connection::class      => fn (ContainerInterface $c) => new Connection($c->get(Config::class), $c->get(LoggerInterface::class)),
             RedisProbe::class      => fn (ContainerInterface $c) => new RedisProbe($c->get(Config::class)),
             RedisFactory::class    => fn (ContainerInterface $c) => new RedisFactory($c->get(Config::class)),
+            // Nativní updater si cesty (root / data dir) rozřeší sám; explicitní bind,
+            // ať PHP-DI nemusí hádat volitelné string parametry konstruktoru.
+            \MyInvoice\Service\Update\NativeUpdateService::class => fn () => new \MyInvoice\Service\Update\NativeUpdateService(),
+            PasskeyService::class  => fn (ContainerInterface $c) => new PasskeyService(
+                $c->get(WebAuthnConfigProvider::class),
+            ),
             \MyInvoice\Service\Signing\SigningPassphraseProviderInterface::class => fn (ContainerInterface $c) => new \MyInvoice\Service\Signing\SigningPassphraseProvider(
                 $c->get(Config::class),
                 $c->get(\MyInvoice\Service\Auth\SecretEncryption::class),
@@ -167,16 +184,18 @@ final class Bootstrap
 
         // Slim 4 LIFO: poslední `add()` = NEJVĚTŠÍ vrstva = běží JAKO PRVNÍ.
         // Cílový order běhu (outside → inside):
-        //   IpAllowlist → FirstRunLock → Auth → RequireTotp → Role → SupplierScope → ApiScope → RateLimit → CSRF → Routing → BodyParsing → Action
+        //   IpAllowlist → FirstRunLock → Auth → SessionLock → RequireMfa → Role → SupplierScope → ApiScope → RateLimit → CSRF → WebAuthnBodyLimit → Routing → BodyParsing → Action
         // → add() v opačném pořadí (innermost první):
         $app->addBodyParsingMiddleware();                            // innermost
         $app->addRoutingMiddleware();
+        $app->add($container->get(WebAuthnBodyLimitMiddleware::class)); // limit raw WebAuthn credential před JSON parsingem
         $app->add($container->get(CsrfMiddleware::class));           // potřebuje session z Auth (bearer skip)
         $app->add($container->get(RateLimitMiddleware::class));      // chrání forgot/setup/login/ARES + per-user/per-token limity
         $app->add($container->get(ApiScopeMiddleware::class));       // bearer-only: enforce read / read_write scope
         $app->add($container->get(SupplierScopeMiddleware::class));  // multi-supplier scope (X-Supplier-Id / token's supplier_id)
         $app->add($container->get(RoleMiddleware::class));           // RBAC — kontrola role po Auth
-        $app->add($container->get(RequireTotpMiddleware::class));    // vynucení 2FA pokud cfg.auth.require_totp=true (bearer skip)
+        $app->add($container->get(RequireMfaMiddleware::class));     // assurance + povinný MFA setup (bearer skip)
+        $app->add($container->get(SessionLockMiddleware::class));    // autoritativní idle/manual lock browser session
         $app->add($container->get(AuthMiddleware::class));           // načte session nebo bearer token
         $app->add($container->get(FirstRunLockMiddleware::class));   // 423 pokud users prázdná
         $app->add($container->get(IpAllowlistMiddleware::class));    // outermost user mw

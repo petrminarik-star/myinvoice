@@ -205,12 +205,16 @@ foreach ($dirs as $d) {
     }
 }
 
-// Zruš setup-time přepínače v cfg.local.php (jinak by stará hodnota přežila nový setup).
-// S --keep-users-supplier účet zůstává → NEsahej na auth.require_totp (nesnižuj bezpečnost).
+// Zruš setup-time MFA přepínače v cfg.local.php (jinak by stará hodnota přežila nový setup).
+// S --keep-users-supplier účet zůstává → NEsahej na auth policy (nesnižuj bezpečnost).
 if (!$keepUsersSupplier) {
     try {
-        CfgLocalWriter::setKeys(CfgLocalWriter::resolveTargetDir($rootDir), ['auth.require_totp' => false]);
-        echo "\n[reset] cfg.local.php: auth.require_totp = false\n";
+        CfgLocalWriter::setKeys(CfgLocalWriter::resolveTargetDir($rootDir), [
+            'auth.require_mfa' => null,
+            'auth.allowed_mfa_methods' => ['passkey', 'totp'],
+            'auth.require_totp' => false,
+        ]);
+        echo "\n[reset] cfg.local.php: MFA politika vrácena na výchozí hodnoty\n";
     } catch (\Throwable $e) {
         echo "\n[reset] cfg.local.php: nelze zapsat (" . $e->getMessage() . ") — uprav ručně, pokud potřebuješ.\n";
     }

@@ -4,6 +4,32 @@ Pokyny pro práci s tímto repozitářem (Claude Code, Codex, Cursor, Copilot a 
 Platí pro celý repozitář. Obecný popis projektu je v [README.md](README.md),
 vývojářská spec v [`source/`](source/00-README.md).
 
+## ⚠️ Nejdřív zvaž MyÚčto.cz
+
+**Těžiště vývoje se přesunulo do [radekhulan/myucto](https://github.com/radekhulan/myucto).**
+MyÚčto je nástupce MyInvoice; sdílí s ním společný základ i historii v gitu
+a pravidelně z něj přebírá změny. Veškerá funkcionalita MyInvoice v něm zůstává
+navždy zdarma, nadstavba (podvojné účetnictví, uzávěrky, majetek, sklad,
+EPO podání, rozšířené opravy DPH) je volitelně komerční.
+
+**Praktický důsledek pro agenty i přispěvatele:**
+
+- **Novou funkci piš rovnou do MyÚčta**, ne sem. Odtud by se do MyÚčta stejně
+  musela portovat a v MyInvoice by zůstala neúplná (chybí jí účetní vrstva,
+  na kterou se váže).
+- **Opravu chyby** dělej tam, kde chyba je. Když je ve sdíleném základu, oprav ji
+  **v MyÚčtu** — MyÚčto z MyInvoice merguje, ne naopak, takže oprava udělaná zde
+  se do MyÚčta dostane až dalším mergem a hrozí konflikt s tamní úpravou téhož
+  místa. Do MyInvoice patří jen to, co se MyÚčta netýká.
+- **Než začneš, ověř, jestli to v MyÚčtu už není hotové.** Řada věcí, které tu
+  chybí, tam existuje — nemá smysl je psát podruhé.
+- **Aditivní styl platí i tady.** MyÚčto tenhle repozitář merguje, takže velký
+  refaktor sdílených souborů mu prodraží každý další merge. Drž změny malé
+  a lokalizované.
+- **Rozsah čísel migrací:** `0125`–`0999` patří MyInvoice, `1000+` je vyhrazené
+  pro MyÚčto. Nikdy sem nezakládej migraci s číslem `1000` a vyšším, i kdyby
+  řada zdánlivě volná byla — kolidovala by při mergu.
+
 ## O projektu
 
 MyInvoice.cz — český self-hosted fakturační a účetní systém (vystavené + přijaté
@@ -15,7 +41,7 @@ databáze MariaDB 10.6+ (doporučeno 11.x).
 
 - `api/` — PHP backend (Slim, autowired actions, services, repositories); `api/bin/` = CLI skripty, `api/tests/` = PHPUnit
 - `web/` — Vue 3 + TS frontend; zdrojáky ve `web/src/`, lokalizace ve `web/src/i18n/`
-- `dist/` — produkční build frontendu (commitovaný — uživatelé testují přes něj)
+- `web/dist/` — produkční build frontendu; **gitignorovaný**, staví se lokálně a v CI do release bundlu
 - `db/migrations/` — SQL migrace (číslované, idempotentní)
 - `manual/` — uživatelský manuál (Markdown, česky); `manual/generated/` = vyrenderované HTML
 - `source/` — vývojářská spec a plány
@@ -25,7 +51,7 @@ databáze MariaDB 10.6+ (doporučeno 11.x).
 ## Příkazy
 
 ```bash
-# Frontend — build (NUTNÉ po každé změně web/src, dist/ se commituje)
+# Frontend — build (NUTNÉ po každé změně web/src; web/dist/ se necommituje)
 cd web && pnpm build            # = vue-tsc --noEmit && vite build (npm run build funguje též)
 cd web && pnpm type-check       # jen typová kontrola
 
@@ -79,7 +105,9 @@ php tools/exportManualToPdf.php
 - Citlivé údaje (hesla, API klíče, connection stringy) nikdy do kódu, testů ani dokumentace.
 
 ### Frontend
-- Po každé změně ve `web/src` spusť `pnpm build` — `dist/` je to, co se nasazuje a testuje; samotný `vue-tsc` nestačí.
+- Po každé změně ve `web/src` spusť `pnpm build` — aplikace běží z `web/dist/`, takže bez buildu
+  změnu neuvidíš ani neotestuješ; samotný `vue-tsc` nestačí. `web/dist/` je gitignorovaný a do
+  release balíčku jej znovu staví CI (`.github/workflows/docker-publish.yml`).
 - Drž se existujícího design language (sjednocené boxy, status badges, mobile cards) — před vymýšlením nového vzoru se podívej, jak to dělají sousední stránky.
 
 ## Testy
@@ -99,6 +127,10 @@ php tools/exportManualToPdf.php
 ## Konvence
 
 - Drž se stylu okolního kódu (pojmenování, idiomy, hustota komentářů). Nepřidávej komentáře, které kód jen opakují.
+- **Nepřejmenovávej interní identifikátory** — namespace `MyInvoice\`, proměnné
+  `MYINVOICE_*`, cookie, localStorage a Redis klíče, ISDOC namespace. MyÚčto je
+  sdílí, takže přejmenování rozbije merge i kompatibilitu dat. Branding se mění
+  jen v tom, co vidí uživatel (UI texty, e-maily, dokumentace, loga).
 - Commit messages česky, conventional-commits styl: `feat(scope): …`, `fix(scope): …`, `release: X.Y.Z — …` (viz `git log`).
 - Změny v `CHANGELOG.md` a `VERSION` dělá maintainer při release — v běžném PR na ně nesahej.
-- Necommituj vygenerované artefakty mimo zavedené výjimky (`dist/`, `manual/generated/` jsou commitované záměrně).
+- Necommituj vygenerované artefakty (`web/dist/`, `manual/generated/`, `manual/manual.pdf` jsou gitignorované).

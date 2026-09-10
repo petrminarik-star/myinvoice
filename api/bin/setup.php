@@ -55,6 +55,7 @@ use MyInvoice\Infrastructure\Config\Config;
 use MyInvoice\Infrastructure\Database\Connection;
 use MyInvoice\Service\Ares\AresClient;
 use MyInvoice\Service\Auth\PasswordHasher;
+use MyInvoice\Service\Auth\WebAuthnConfig;
 use MyInvoice\Service\Config\CfgLocalWriter;
 use Monolog\Logger;
 
@@ -160,11 +161,32 @@ while (strlen($adminPass) < 12) {
 echo "\n================================================\n";
 echo "  BEZPEČNOST\n";
 echo "================================================\n";
-echo "  Vynucení 2FA (TOTP) pro VŠECHNY uživatele po přihlášení?\n";
-echo "  Doporučeno pro produkci. Po loginu budeš zamčen na /setup-totp,\n";
-echo "  dokud neaktivuješ 2FA v autentikační aplikaci.\n";
-$requireTotpAns = strtolower(prompt('Vynutit 2FA? (ano/NE)', 'ne'));
-$requireTotp = in_array($requireTotpAns, ['ano', 'a', 'y', 'yes', 'true'], true);
+echo "  Vynucení vícefaktorového ověření (MFA) pro VŠECHNY uživatele?\n";
+echo "  Doporučeno pro produkci. Po loginu uživatel dokončí passkey nebo TOTP.\n";
+$requireMfaAns = strtolower(prompt('Vynutit MFA? (ano/NE)', 'ne'));
+$requireMfa = in_array($requireMfaAns, ['ano', 'a', 'y', 'yes', 'true'], true);
+$allowedMfaMethods = ['passkey', 'totp'];
+if ($requireMfa) {
+    while (true) {
+        $methodsRaw = strtolower(prompt('Povolené metody (passkey,totp)', 'passkey,totp'));
+        $allowedMfaMethods = array_values(array_unique(array_filter(array_map('trim', explode(',', $methodsRaw)))));
+        if ($allowedMfaMethods !== []
+            && array_diff($allowedMfaMethods, ['passkey', 'totp']) === []
+        ) {
+            if ($allowedMfaMethods === ['passkey']) {
+                try {
+                    new WebAuthnConfig($config);
+                } catch (\InvalidArgumentException $e) {
+                    echo "    ⚠  Passkey-only MFA nelze s aktuální app.url použít: {$e->getMessage()}\n";
+                    echo "       Uprav app.url, ukonči setup, nebo zvol také TOTP jako dostupnou metodu.\n";
+                    continue;
+                }
+            }
+            break;
+        }
+        echo "    ⚠  Zadej neprázdnou kombinaci: passkey, totp nebo passkey,totp.\n";
+    }
+}
 
 echo "\n================================================\n";
 echo "  Shrnutí:\n";
@@ -172,7 +194,9 @@ echo "    Firma:  {$supplier['company_name']} ({$supplier['ic']})\n";
 echo "    Adresa: {$supplier['street']}, {$supplier['zip']} {$supplier['city']}\n";
 echo "    Email:  {$supplier['email']}\n";
 echo "    Admin:  {$adminName} <{$adminEmail}>\n";
-echo "    2FA:    " . ($requireTotp ? 'VYNUCENO pro všechny uživatele' : 'volitelné (per-user)') . "\n";
+echo "    MFA:    " . ($requireMfa
+    ? 'VYNUCENO (' . implode(', ', $allowedMfaMethods) . ')'
+    : 'volitelné (per-user)') . "\n";
 echo "================================================\n";
 $confirm = prompt('Pokračovat? (ANO/ne)', 'ANO');
 if ($confirm !== 'ANO') {
@@ -259,20 +283,24 @@ try {
     exit(1);
 }
 
-// === Zapiš require_totp do cfg.local.php (vždy, aby starší hodnota nezůstávala v platnosti) ===
+// === Zapiš obecnou MFA politiku a vypni legacy TOTP-only přepínač ===
 try {
-    CfgLocalWriter::setKeys(CfgLocalWriter::resolveTargetDir($rootDir), ['auth.require_totp' => $requireTotp]);
-    echo "\n🔒  Nastavení 2FA zapsáno do cfg.local.php (auth.require_totp = " . ($requireTotp ? 'true' : 'false') . ").\n";
+    CfgLocalWriter::setKeys(CfgLocalWriter::resolveTargetDir($rootDir), [
+        'auth.require_mfa' => $requireMfa,
+        'auth.allowed_mfa_methods' => $allowedMfaMethods,
+        'auth.require_totp' => false,
+    ]);
+    echo "\n🔒  Nastavení MFA zapsáno do cfg.local.php.\n";
 } catch (\Throwable $e) {
     echo "\n⚠   Nepodařilo se zapsat cfg.local.php: " . $e->getMessage() . "\n";
-    echo "    Otevři ručně cfg.local.php a nastav: 'auth' => ['require_totp' => " . ($requireTotp ? 'true' : 'false') . "].\n";
+    echo "    Nastav ručně auth.require_mfa a auth.allowed_mfa_methods.\n";
 }
 
 echo "\n✅  Hotovo.\n";
 echo "    Přihlas se na " . $config->get('app.url', '/') . "/login\n";
 echo "    Email: $adminEmail\n";
-if ($requireTotp) {
-    echo "    Po přihlášení budeš přesměrován na /setup-totp pro aktivaci 2FA.\n";
+if ($requireMfa) {
+    echo "    Po přihlášení budeš přesměrován na /setup-mfa pro aktivaci MFA.\n";
 }
 echo "    Bankovní účet pro CZK doplň v Systém → Nastavení.\n\n";
 

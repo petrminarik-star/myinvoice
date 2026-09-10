@@ -181,6 +181,33 @@ Tabulka uživatelů, kteří se mohou přihlásit. Tlačítko **+ Nový uživate
 > jsi sám admin a zkusíš si snížit roli, vrátí 409. Musí být minimálně 1
 > admin v systému.
 
+### 36.2.3 Přístup k firmám
+
+V editaci uživatele je sekce **Přístup k firmám** se seznamem dodavatelů
+zavedených v instalaci. Slouží k tomu, aby externí účetní nebo auditor viděl
+jen jednu z firem, které v aplikaci vedeš.
+
+| Stav | Co uživatel vidí |
+|---|---|
+| **Nic nezaškrtnuto** | Všechny firmy (výchozí stav — po upgradu se nic nemění) |
+| **Zaškrtnuté firmy** | Jen vybrané firmy — v přepínači i v datech |
+
+U každé zaškrtnuté firmy lze navíc zvolit **roli pro tuto firmu**. Prázdná
+volba (*— globální role —*) znamená, že platí role uživatele z formuláře výše;
+konkrétní volba ji pro danou firmu přepíše. Typicky: globální **accountant**,
+který má být v jedné z firem jen **readonly**.
+
+> 🛈 Role **admin** je celoinstanční — přiřazení firem se u ní neuplatní a admin
+> vidí vždy všechny firmy. Proto se instalace nedá „vyzamknout". Ze stejného
+> důvodu nejde per-firmu nastavit role `admin`, jen `accountant` a `readonly`.
+
+Omezení hlídá server, ne jen UI:
+
+- doklad či seznam pod cizí firmou vrátí `403` (`forbidden_supplier`),
+- detail cizí firmy vrátí `404` (neprozrazuje, že existuje),
+- **API token** vázaný na firmu mimo přiřazené se nevytvoří a nefunguje,
+- po odebrání firmy si aplikace sama přepne na první povolenou.
+
 ## 36.3 Můj profil
 
 **Pravý horní roh → klik na jméno → Můj profil**. Stejná obrazovka jako
@@ -190,9 +217,33 @@ Můžeš si změnit:
 
 - **Jméno + jazyk**
 - **Heslo** — vyžaduje původní heslo
-- **2FA** — zapnout / vypnout (vyžaduje heslo + ověření TOTP)
+- **TOTP** — zobrazit stav a aktivovat pomocí QR + ověřovacího kódu
+- **Passkeys** — přidat, pojmenovat, přejmenovat a odvolat vlastní přístupové
+  klíče
+- **Zámek aplikace** — převzít interval správce nebo nastavit vlastní přísnější
+  interval nečinnosti
 
-Viz [39. Bezpečnost § 37.2](39_Bezpecnost.md) pro detail TOTP.
+Přidání nebo odvolání passkey vyžaduje čerstvý passkey/TOTP step-up; první
+passkey účtu bez silného faktoru vyžádá aktuální heslo. Odvolání passkey
+zneplatní ostatní session účtu. Při povinném MFA nelze odebrat poslední
+povolený silný faktor.
+
+V uživatelském menu je také akce **Zamknout**. Správce nastavuje výchozí
+serverový zámek a současně horní limit osobní volby v `cfg.php`:
+
+```php
+'session' => [
+    'lock_after_minutes' => 15, // kladná hodnota zámek zapne; výchozí je 0
+],
+```
+
+Stejné nastavení lze předat přes
+`MYINVOICE_SESSION_LOCK_AFTER_MINUTES`. Automatický zámek je ve výchozím stavu
+vypnutý (`0`). Při této hodnotě jej může uživatel dobrovolně zapnout v profilu
+v rozsahu 1 až 1440 minut. Kladná hodnota správce platí pro uživatele, kteří
+zvolili **Použít nastavení správce**, a je nepřekročitelným maximem; vlastní
+interval proto může být jen stejný nebo kratší. Ruční zamknutí zůstává dostupné
+vždy. Podrobnosti jsou v [39. Bezpečnost](39_Bezpecnost.md).
 
 ## 36.4 E-mailové šablony
 

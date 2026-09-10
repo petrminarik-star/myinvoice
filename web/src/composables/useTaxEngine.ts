@@ -4,7 +4,7 @@
  * (`c`) chodí z backendu (TaxConstants), takže existuje jediný zdroj čísel.
  * Autoritativní výpočet zůstává na backendu (PHP), tohle je pro svižné UI.
  */
-import type { TaxConstantsData, TaxProfile } from '@/api/tax'
+import type { PausalSegment, TaxConstantsData, TaxProfile } from '@/api/tax'
 
 export interface EngineProfile extends TaxProfile {
   is_vat_payer: boolean
@@ -50,6 +50,59 @@ export function pausal(p: EngineProfile, income: number, c: TaxConstantsData): P
   const b = effBand(p.flat_tax_band, p.activity_rate, income, c)
   if (!b.ok) return { ok: false, reason: b.reason, total: null }
   return { ok: true, eff: b.eff, declared: b.declared, surcharge: b.surcharge, total: c.pausal_annual[b.eff!], note: b.eff !== b.declared }
+}
+
+export interface PausalPeriod { from: string; to: string; months: number; amount: number }
+
+/**
+ * Rozpad roku na období se stejnou měsíční zálohou (zrcadlo PausalSchedule::breakdown).
+ * Segmenty z backendu jsou ukotvené k zobrazovanému roku a začínají 1. lednem.
+ */
+export function pausalPeriods(c: TaxConstantsData, band: string): PausalPeriod[] {
+  const segs: PausalSegment[] = (c.pausal_monthly || []).filter(s => s && typeof s.from === 'string')
+  if (!segs.length || !(band in (segs[0] as any))) return []
+  const year = Number(segs[0].from.slice(0, 4))
+  return segs.map((s, i) => {
+    const startMonth = Number(s.from.slice(5, 7))
+    const endMonth = i + 1 < segs.length ? Number(segs[i + 1].from.slice(5, 7)) - 1 : 12
+    return {
+      from: s.from,
+      to: `${year}-${String(endMonth).padStart(2, '0')}-${new Date(year, endMonth, 0).getDate()}`,
+      months: endMonth - startMonth + 1,
+      amount: (s as any)[band] as number,
+    }
+  })
+}
+
+export interface PausalRateChange {
+  from: string
+  previousMonthly: number
+  monthly: number
+  monthsAtPrevious: number
+  /** Přeplatek za měsíce zaplacené vyšší zálohou (jen při snížení sazby). */
+  overpaid: number
+  /** O přeplatek snížená nejbližší záloha (§ 38lk ZDP). */
+  reducedAdvance: number
+}
+
+/** Poslední změna měsíční zálohy v roce — podklad pro upozornění v UI. */
+export function pausalRateChange(c: TaxConstantsData, band: string): PausalRateChange | null {
+  const p = pausalPeriods(c, band)
+  if (p.length < 2) return null
+  const last = p[p.length - 1]
+  const prev = p[p.length - 2]
+  const diff = prev.amount - last.amount
+  if (diff <= 0) return null // zvýšení sazby přeplatek netvoří
+  const monthsAtPrevious = p.slice(0, -1).reduce((s, x) => s + x.months, 0)
+  const overpaid = Math.round(diff * monthsAtPrevious)
+  return {
+    from: last.from,
+    previousMonthly: prev.amount,
+    monthly: last.amount,
+    monthsAtPrevious,
+    overpaid,
+    reducedAdvance: Math.max(0, Math.round(last.amount - overpaid)),
+  }
 }
 
 function kidSum(n: number, arr: number[]): number {

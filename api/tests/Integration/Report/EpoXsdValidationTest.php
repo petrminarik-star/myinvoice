@@ -221,9 +221,11 @@ final class EpoXsdValidationTest extends TestCase
         }
 
         // c_okec v VetaD je jen u DPH (KH XSD ho nemá v povolených atributech) — a jen
-        // pokud supplier má vyplněný cz_nace_code (jinak se atribut legitimně nevyplní).
+        // pokud supplier má cz_nace_code s alespoň 4 číslicemi (oddíl/legacy hodnota
+        // se do XML legitimně nevyplní — zrcadlí normalizeOkec).
         $vetaD = $root->VetaD;
-        if ($formCode === 'dphdp3' && !empty($sup['cz_nace_code'])) {
+        $supNaceDigits = preg_replace('/\D/', '', (string) ($sup['cz_nace_code'] ?? '')) ?? '';
+        if ($formCode === 'dphdp3' && strlen($supNaceDigits) >= 4) {
             $this->assertNotEmpty(
                 (string) $vetaD['c_okec'],
                 'VetaD.c_okec chybí — supplier.cz_nace_code se nepřenáší do XML',

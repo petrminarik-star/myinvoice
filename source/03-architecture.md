@@ -124,7 +124,7 @@ myinvoice.cz/
 │
 ├── storage/                      # gitignore, runtime data
 │   ├── invoices/                 # cached PDF: YYYY-MM/Faktura-YY-MM-NNN.pdf
-│   ├── sessions/                 # fallback pokud bez Redis
+│   ├── sessions/                 # rezervovaný runtime prostor
 │   ├── uploads/                  # supplier logo, signature
 │   ├── cache/                    # Twig compile cache
 │   └── backup/                   # mariadb-dump archivy
@@ -343,9 +343,18 @@ return [
     'session' => [
         'driver'        => 'auto',              // auto | redis | db
         'lifetime_days' => 30,
-        'cookie_name'   => 'myinvoice_session',
+        'lock_after_minutes' => 0,               // výchozí + maximum osobní volby; 0 nic nevynucuje
+        'cookie_name'   => '__Host-myinvoice_session',
         'cookie_secure' => true,
         'cookie_samesite' => 'Lax',
+    ],
+    'auth' => [
+        'require_mfa' => null,                   // null = kompatibilita s require_totp
+        'allowed_mfa_methods' => ['passkey', 'totp'],
+        'passwordless_login' => [
+            'enabled' => false,                  // opt-in discoverable passkey login
+        ],
+        'require_totp' => false,                 // legacy TOTP-only politika
     ],
     'smtp' => [
         'host'       => '',

@@ -21,6 +21,15 @@ export interface DphPriznaniPreview {
     supplier_vat_period: string
   }
   warnings: string[]
+  /** Chybějící POVINNÁ pole EPO identifikace — náhled neblokují, stažení XML ano. */
+  missing?: EpoMissingField[]
+}
+
+/** Pole identifikace daňového subjektu, které chybí v Nastavení → Daňové nastavení. */
+export interface EpoMissingField {
+  field: string
+  label: string
+  why: string
 }
 
 export interface DphSettings {
@@ -45,6 +54,8 @@ export interface KhPreview {
     submission_deadline: string
   }
   warnings: string[]
+  /** Chybějící POVINNÁ pole EPO identifikace — náhled neblokují, stažení XML ano. */
+  missing?: EpoMissingField[]
 }
 
 export interface DphTrendRow {
@@ -282,6 +293,8 @@ export const reportsApi = {
         submission_deadline: string
       }
       warnings: string[]
+      /** Chybějící POVINNÁ pole EPO identifikace — náhled neblokují, stažení XML ano. */
+      missing?: EpoMissingField[]
     }>('/reports/dphshv/preview', { params: { year, month, ...(period ? { period } : {}) } }).then(r => r.data),
 
   shvDownloadUrl: (year: number, month: number, period?: 'monthly' | 'quarterly') => {
@@ -315,11 +328,17 @@ export const reportsApi = {
     return `/api/reports/income-tax?${params.toString()}`
   },
 
-  khDownloadUrl: (year: number, month: number, period?: 'monthly' | 'quarterly') => {
+  khDownloadUrl: (year: number, month: number, period?: 'monthly' | 'quarterly', form?: string, dZjist?: string) => {
     const sid = localStorage.getItem('myinvoice.current_supplier_id')
     const params = new URLSearchParams({ year: String(year), month: String(month) })
     if (sid && /^\d+$/.test(sid)) params.set('supplier_id', sid)
     if (period) params.set('period', period)
+    // Forma podání (B řádné / O opravné / N následné) + datum zjištění důvodů
+    // pro následné KH (DD.MM.YYYY, povinné u N) — viz KontrolniHlaseniAction.
+    if (form && form !== 'B') {
+      params.set('form', form)
+      if (dZjist) params.set('d_zjist', dZjist)
+    }
     return `/api/reports/dphkh1?${params.toString()}`
   },
 
@@ -363,8 +382,8 @@ export const reportsApi = {
     api.get<MonthlyExportJob>(`/reports/monthly-export/jobs/${id}`).then(r => r.data),
 
   /** Poslední exporty (historie — zůstávají ke stažení dokud nejsou smazané / uklizené). */
-  monthlyExportJobs: () =>
-    api.get<MonthlyExportJob[]>('/reports/monthly-export/jobs').then(r => r.data),
+  monthlyExportJobs: (signal?: AbortSignal) =>
+    api.get<MonthlyExportJob[]>('/reports/monthly-export/jobs', { signal }).then(r => r.data),
 
   monthlyExportCancel: (id: number) =>
     api.post<{ ok: boolean; cancel_requested: boolean }>(`/reports/monthly-export/jobs/${id}/cancel`).then(r => r.data),
@@ -382,11 +401,18 @@ export const reportsApi = {
   },
 
   /** URL na download endpoint — frontend ho otevírá v novém okně */
-  dphDownloadUrl: (year: number, month: number, period?: 'monthly' | 'quarterly') => {
+  dphDownloadUrl: (year: number, month: number, period?: 'monthly' | 'quarterly', form?: string, dZjist?: string) => {
     const sid = localStorage.getItem('myinvoice.current_supplier_id')
     const params = new URLSearchParams({ year: String(year), month: String(month) })
     if (period) params.set('period', period)
     if (sid && /^\d+$/.test(sid)) params.set('supplier_id', sid)
+    // Forma podání (B řádné / O opravné; dodatečné D/E backend odmítá do
+    // implementace dopočtu rozdílů dle § 141/2 DŘ) + volitelné datum zjištění
+    // důvodů u O (DD.MM.YYYY) — viz DphPriznaniAction.
+    if (form && form !== 'B') {
+      params.set('form', form)
+      if (dZjist) params.set('d_zjist', dZjist)
+    }
     return `/api/reports/dphdp3?${params.toString()}`
   },
 }

@@ -114,7 +114,11 @@ final class IncomeTaxBuilder
                 'exempt_revenue_orientacni' => round($totals['exempt_revenue'] ?? 0, 2),
                 'costs_orientacni'   => round($totals['costs'], 2),
                 'profit_orientacni'  => round($totals['revenue'] - $totals['costs'], 2),
-                'submission_deadline' => sprintf('%04d-04-01', $year + 1),  // do 1.4. následujícího roku
+                // Do 1. 4. následujícího roku (§ 136/1 DŘ, základní lhůta) + § 33/4:
+                // víkend/svátek → nejbližší následující pracovní den.
+                'submission_deadline' => CzechWorkingDays::shiftToWorkingDay(
+                    new \DateTimeImmutable(sprintf('%04d-04-01', $year + 1))
+                )->format('Y-m-d'),
                 'currency'          => 'CZK',
                 'is_vat_payer'      => $isVatPayer,  // true → částky bez DPH, false → vč. DPH
             ],
@@ -173,9 +177,13 @@ final class IncomeTaxBuilder
         $stmt->execute([$supplierId, $start, $end]);
         $exemptRevenue = (float) ($stmt->fetchColumn() ?: 0);
 
-        // Costs z přijatých
+        // Costs z přijatých. Přijatý dobropis (credit_note) náklady VŽDY snižuje →
+        // -ABS(), protože v DB žijí obě znaménkové konvence (záporné z ručního
+        // pořízení/AI, kladné z části importů) — viz VatLedgerService::fetchPurchases.
         $stmt = $this->db->pdo()->prepare(
-            "SELECT SUM(COALESCE(pi.{$amount}, 0)) AS total
+            "SELECT SUM(CASE WHEN pi.document_kind = 'credit_note'
+                             THEN -ABS(COALESCE(pi.{$amount}, 0))
+                             ELSE COALESCE(pi.{$amount}, 0) END) AS total
                FROM purchase_invoices pi
           LEFT JOIN currencies c ON c.id = pi.currency_id
               WHERE pi.supplier_id = ?

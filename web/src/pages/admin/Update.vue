@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { ref, computed } from 'vue'
+import { RouterLink } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { useAuthStore } from '@/stores/auth'
-import { updateApi, type UpdateStatus } from '@/api/update'
+import { updateApi, type UpdateStatus, type UpdatePreflight } from '@/api/update'
 import { systemApi, type HealthResponse } from '@/api/client'
+import { useSessionAwarePolling } from '@/composables/useSessionAwarePolling'
 
 const { t } = useI18n()
 const auth = useAuthStore()
@@ -13,19 +15,30 @@ const health = ref<HealthResponse | null>(null)
 const checking = ref(false)
 const triggering = ref(false)
 const cancelling = ref(false)
-const triggerResult = ref<{ status: string; message?: string; instructions?: string[] } | null>(null)
+const triggerResult = ref<{
+  status: string
+  message?: string
+  instructions?: string[]
+  blockers?: string[]
+} | null>(null)
 const errorMsg = ref<string | null>(null)
+const preflight = ref<UpdatePreflight | null>(null)
 
-let pollHandle: number | null = null
+const pollingEnabled = ref(true)
 
 const isAdmin = computed(() => auth.user?.role === 'admin')
 
-async function load() {
+/** Nativní instalace umí update provést sama (Docker jede přes host watcher). */
+const nativeAuto = computed(
+  () => status.value?.environment === 'native' && preflight.value?.ok === true,
+)
+
+async function load(signal?: AbortSignal) {
   errorMsg.value = null
   try {
     const [nextStatus, nextHealth] = await Promise.all([
-      updateApi.status(),
-      systemApi.health(),
+      updateApi.status(signal),
+      systemApi.health(signal),
     ])
     status.value = nextStatus
     health.value = nextHealth
@@ -33,6 +46,21 @@ async function load() {
     // aby uživatel nemusel mačkat "Zkontrolovat nyní" sám. Tichý fail je OK.
     if (nextStatus.cache_stale && !checking.value) {
       void backgroundRefresh()
+    }
+    // Preflight jen u nativní instalace s dostupným updatem — zapisuje probe
+    // soubory, takže ho nechceme na každém pollu. Tichý fail: UI pak nabídne
+    // ruční postup.
+    if (
+      nextStatus.environment === 'native' &&
+      nextStatus.has_update &&
+      nextStatus.latest &&
+      preflight.value === null
+    ) {
+      try {
+        preflight.value = await updateApi.preflight(nextStatus.latest, signal)
+      } catch {
+        /* ponech null — zobrazí se ruční postup */
+      }
     }
   } catch (e: unknown) {
     errorMsg.value = (e as Error)?.message ?? 'Failed to load status'
@@ -66,7 +94,10 @@ async function refresh() {
 
 async function triggerUpgrade() {
   if (!status.value?.latest || triggering.value) return
-  if (!confirm(t('updates.trigger_update', { version: status.value.latest }) + '?')) return
+  const question = nativeAuto.value
+    ? t('updates.trigger_native_confirm', { version: status.value.latest })
+    : t('updates.trigger_update', { version: status.value.latest }) + '?'
+  if (!confirm(question)) return
   triggering.value = true
   triggerResult.value = null
   try {
@@ -74,9 +105,10 @@ async function triggerUpgrade() {
     triggerResult.value = r
     // Pro Docker: po queue startuj polling, ať vidíme result.json až watcher dojede
     if (r.status === 'queued') {
-      startPolling()
+      pollingEnabled.value = true
+    } else {
+      await load()
     }
-    await load()
   } catch (e: unknown) {
     errorMsg.value = (e as Error)?.message ?? 'Trigger failed'
   } finally {
@@ -91,7 +123,7 @@ async function cancelStuckUpgrade() {
   errorMsg.value = null
   try {
     await updateApi.cancel()
-    stopPolling()
+    pollingEnabled.value = false
     triggerResult.value = null
     await load()
   } catch (e: unknown) {
@@ -101,32 +133,19 @@ async function cancelStuckUpgrade() {
   }
 }
 
-function startPolling() {
-  if (pollHandle !== null) return
-  pollHandle = window.setInterval(async () => {
-    await load()
-    if (status.value && !status.value.upgrade_in_progress) {
-      stopPolling()
-    }
-  }, 5000)
-}
-
-function stopPolling() {
-  if (pollHandle !== null) {
-    window.clearInterval(pollHandle)
-    pollHandle = null
+async function pollUpdate(signal: AbortSignal) {
+  await load(signal)
+  const running = status.value?.upgrade_in_progress === true
+  pollingEnabled.value = running
+  // „Zařazeno do fronty" je jen překlenutí, než worker začne hlásit průběh.
+  // Jakmile doběhne, platný stav ukazuje panel s výsledkem — bez tohohle by
+  // hláška o zařazení visela vedle něj až do reloadu stránky.
+  if (!running && triggerResult.value?.status === 'queued' && status.value?.last_upgrade_result) {
+    triggerResult.value = null
   }
 }
 
-onMounted(async () => {
-  await load()
-  // Pokud je při otevření stránky upgrade „v běhu", spusť polling — backend se navíc
-  // sám uzdraví (prošlý flag / cílová verze už nasazená), takže se to nezasekne.
-  if (status.value?.upgrade_in_progress) {
-    startPolling()
-  }
-})
-onUnmounted(stopPolling)
+useSessionAwarePolling(pollUpdate, 5000, pollingEnabled)
 
 // Mini markdown renderer pro release notes (GitHub release body).
 // Žádný HTML injection — escape všechno, pak inline tagy + bloky.
@@ -140,6 +159,7 @@ function renderMarkdown(md: string): string {
   const out: string[] = []
   let listType: 'ul' | 'ol' | null = null
   let para: string[] = []
+  let li: string[] | null = null
   let inFence = false
   let fenceBuf: string[] = []
 
@@ -149,7 +169,16 @@ function renderMarkdown(md: string): string {
       para = []
     }
   }
+  // Odrážka se sbírá po řádcích: pokračovací řádky (zalomený text odstavce
+  // pod `- `) patří pořád do téže položky, ne do samostatného odstavce.
+  const flushLi = () => {
+    if (li) {
+      out.push('<li>' + inline(li.join(' ')) + '</li>')
+      li = null
+    }
+  }
   const closeList = () => {
+    flushLi()
     if (listType) {
       out.push(`</${listType}>`)
       listType = null
@@ -212,14 +241,20 @@ function renderMarkdown(md: string): string {
     }
     if (/^[-*]\s+/.test(trim)) {
       flushPara()
+      flushLi()
       ensureList('ul')
-      out.push('<li>' + inline(trim.replace(/^[-*]\s+/, '')) + '</li>')
+      li = [trim.replace(/^[-*]\s+/, '')]
       continue
     }
     if (/^\d+\.\s+/.test(trim)) {
       flushPara()
+      flushLi()
       ensureList('ol')
-      out.push('<li>' + inline(trim.replace(/^\d+\.\s+/, '')) + '</li>')
+      li = [trim.replace(/^\d+\.\s+/, '')]
+      continue
+    }
+    if (li) {
+      li.push(trim)
       continue
     }
     closeList()
@@ -242,11 +277,13 @@ const healthWarnings = computed(() => health.value?.warnings ?? [])
 
 function warningTitle(code: string): string {
   if (code === 'secret_encryption_key') return t('updates.warning_secret_key_title')
+  if (code === 'webauthn_configuration') return t('updates.warning_webauthn_title')
   return t('updates.warning_generic_title')
 }
 
 function warningText(code: string): string {
   if (code === 'secret_encryption_key') return t('updates.warning_secret_key_text')
+  if (code === 'webauthn_configuration') return t('updates.warning_webauthn_text')
   return t('updates.warning_generic_text')
 }
 
@@ -272,6 +309,24 @@ function fmtDate(s?: string | null): string {
     </div>
 
     <div v-else-if="status" class="space-y-6">
+      <!-- Promo: přechod na nástupce MyÚčto -->
+      <RouterLink
+        to="/admin/upgrade"
+        class="block rounded-lg border border-primary-300 bg-primary-50/40 p-5 hover:bg-primary-50/70 transition-colors"
+      >
+        <div class="flex items-start justify-between gap-4">
+          <div class="min-w-0">
+            <h2 class="text-lg font-semibold text-neutral-900">{{ t('updates.myucto_promo_title') }}</h2>
+            <p class="text-sm text-neutral-700 mt-1.5">{{ t('updates.myucto_promo_text') }}</p>
+            <p class="text-xs text-neutral-600 mt-2">{{ t('updates.myucto_promo_free') }}</p>
+          </div>
+          <span class="shrink-0 inline-flex items-center gap-1.5 rounded-md bg-primary-600 px-3 py-1.5 text-sm font-semibold text-white">
+            <span>{{ t('updates.myucto_promo_cta') }}</span>
+            <svg class="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6"/></svg>
+          </span>
+        </div>
+      </RouterLink>
+
       <!-- Stav: aktuální vs. poslední -->
       <section v-if="healthWarnings.length" class="rounded-lg border border-warning-300 bg-warning-50/40 p-5">
         <h2 class="text-lg font-semibold text-warning-900">{{ t('updates.warnings_title') }}</h2>
@@ -375,7 +430,12 @@ function fmtDate(s?: string | null): string {
           <template v-else>{{ triggerResult.status }}</template>
         </h2>
         <p v-if="triggerResult.message" class="text-sm text-neutral-700 mt-1.5">{{ triggerResult.message }}</p>
-        <div v-if="triggerResult.status === 'queued'"
+        <ul v-if="triggerResult.blockers?.length" class="mt-2 space-y-1">
+          <li v-for="b in triggerResult.blockers" :key="b" class="text-sm text-warning-800 flex gap-1.5">
+            <span aria-hidden="true">•</span><span>{{ b }}</span>
+          </li>
+        </ul>
+        <div v-if="triggerResult.status === 'queued' && status.environment === 'docker'"
           class="text-xs text-neutral-600 mt-2">{{ t('updates.queued_desc') }}</div>
         <pre v-if="triggerResult.instructions?.length"
           class="mt-3 rounded-md bg-neutral-900 text-neutral-100 p-3 text-xs leading-relaxed overflow-x-auto"><code>{{ triggerResult.instructions.join('\n') }}</code></pre>
@@ -388,7 +448,33 @@ function fmtDate(s?: string | null): string {
           <svg class="w-5 h-5 animate-spin text-primary-600" fill="none" viewBox="0 0 24 24" stroke="currentColor" stroke-width="2"><path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 0 0 4.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 0 1-15.357-2m15.357 2H15"/></svg>
           {{ t('updates.in_progress_title') }}
         </h2>
-        <p class="text-sm text-neutral-600 mt-1.5">{{ t('updates.in_progress_desc') }}</p>
+        <p class="text-sm text-neutral-600 mt-1.5">
+          {{ status.upgrade_progress?.mode === 'native'
+            ? t('updates.in_progress_native_desc')
+            : t('updates.in_progress_desc') }}
+        </p>
+
+        <!-- Nativní worker hlásí konkrétní krok — ukaž ho jako progress. -->
+        <div v-if="status.upgrade_progress" class="mt-3">
+          <div class="flex items-baseline justify-between gap-3 text-sm">
+            <span class="font-medium text-neutral-800">{{ status.upgrade_progress.step_message }}</span>
+            <span class="text-xs text-neutral-500 whitespace-nowrap">
+              {{ t('updates.step_of', {
+                index: status.upgrade_progress.step_index,
+                count: status.upgrade_progress.step_count,
+              }) }}
+            </span>
+          </div>
+          <div class="mt-2 h-1.5 rounded-full bg-primary-100 overflow-hidden">
+            <div
+              class="h-full bg-primary-600 transition-all duration-500"
+              :style="{ width: Math.round(
+                (status.upgrade_progress.step_index / Math.max(1, status.upgrade_progress.step_count)) * 100,
+              ) + '%' }"
+            ></div>
+          </div>
+          <p class="text-xs text-neutral-500 mt-2">{{ t('updates.step_' + status.upgrade_progress.step) }}</p>
+        </div>
         <div class="mt-3 pt-3 border-t border-primary-200/60 flex items-center gap-3 flex-wrap">
           <button type="button" @click="cancelStuckUpgrade" :disabled="cancelling"
             class="cursor-pointer h-8 px-3 text-sm border border-neutral-300 bg-surface hover:bg-neutral-50 rounded-md inline-flex items-center gap-1.5 disabled:opacity-50">
@@ -426,6 +512,14 @@ function fmtDate(s?: string | null): string {
           <div v-if="status.last_upgrade_result.message" class="text-neutral-600 mt-1">
             {{ status.last_upgrade_result.message }}
           </div>
+          <div v-if="status.last_upgrade_result.log_path" class="text-xs text-neutral-500 mt-1">
+            {{ t('updates.result_log') }}:
+            <span class="font-mono break-all">{{ status.last_upgrade_result.log_path }}</span>
+          </div>
+          <div v-if="status.last_upgrade_result.backup_path" class="text-xs text-neutral-500">
+            {{ t('updates.result_backup') }}:
+            <span class="font-mono break-all">{{ status.last_upgrade_result.backup_path }}</span>
+          </div>
         </div>
       </section>
 
@@ -462,26 +556,48 @@ powershell -NoProfile -ExecutionPolicy Bypass -File cmd\docker-update.ps1</code>
             {{ t('updates.how_native_title') }}
           </h3>
           <p class="text-sm text-neutral-600 mt-1.5 leading-relaxed">{{ t('updates.how_native_desc') }}</p>
-          <pre class="mt-2 rounded-md bg-neutral-900 text-neutral-100 p-3 text-xs leading-relaxed overflow-x-auto"><code># Klasický postup (vyžaduje Composer + Node + pnpm na hostu)
+
+          <!-- Preflight: co brání automatické cestě -->
+          <div v-if="preflight && !preflight.ok && preflight.supported"
+            class="mt-3 rounded-md border border-warning-200 bg-warning-50 p-3">
+            <div class="text-sm font-medium text-warning-900">{{ t('updates.preflight_blocked') }}</div>
+            <ul class="mt-1.5 space-y-1">
+              <li v-for="b in preflight.blockers" :key="b" class="text-sm text-warning-800 flex gap-1.5">
+                <span aria-hidden="true">•</span><span>{{ b }}</span>
+              </li>
+            </ul>
+          </div>
+          <div v-else-if="preflight?.ok" class="mt-3 rounded-md border border-success-300 bg-success-50 p-3">
+            <div class="text-sm font-medium text-success-800">{{ t('updates.preflight_ok') }}</div>
+            <ul v-if="preflight.warnings.length" class="mt-1.5 space-y-1">
+              <li v-for="w in preflight.warnings" :key="w" class="text-sm text-neutral-600 flex gap-1.5">
+                <span aria-hidden="true">•</span><span>{{ w }}</span>
+              </li>
+            </ul>
+          </div>
+
+          <p class="text-sm text-neutral-600 mt-3 leading-relaxed">{{ t('updates.how_native_manual') }}</p>
+          <pre class="mt-2 rounded-md bg-neutral-900 text-neutral-100 p-3 text-xs leading-relaxed overflow-x-auto"><code># Production bundle — nepotřebuje Composer ani Node
+curl -LO https://github.com/radekhulan/myinvoice/releases/download/v{{ status.latest ?? 'X.Y.Z' }}/myinvoice-{{ status.latest ?? 'X.Y.Z' }}.tar.gz
+curl -LO https://github.com/radekhulan/myinvoice/releases/download/v{{ status.latest ?? 'X.Y.Z' }}/myinvoice-{{ status.latest ?? 'X.Y.Z' }}.tar.gz.sha256
+sha256sum -c myinvoice-{{ status.latest ?? 'X.Y.Z' }}.tar.gz.sha256
+tar -xzf myinvoice-{{ status.latest ?? 'X.Y.Z' }}.tar.gz --strip-components=1 \
+  --exclude='cfg.php' --exclude='cfg.local.php' --exclude='cfg.docker.php' \
+  --exclude='storage' --exclude='private' --exclude='log'
+php api/bin/migrate.php
+
+# Nebo z gitu (vyžaduje Composer + Node + pnpm na hostu)
 git fetch --tags
 git checkout v{{ status.latest ?? 'X.Y.Z' }}
 cd api && composer install --no-dev && cd ..
 cd web && pnpm install && pnpm build && cd ..
 php tools/generateManualHtml.php
 php tools/exportManualToPdf.php
-php api/bin/migrate.php
-
-# Alternativa: production bundle (bez Composer / Node)
-# https://github.com/radekhulan/myinvoice/releases/latest
-curl -LO https://github.com/radekhulan/myinvoice/releases/download/v{{ status.latest ?? 'X.Y.Z' }}/myinvoice-{{ status.latest ?? 'X.Y.Z' }}.tar.gz
-tar -xzf myinvoice-{{ status.latest ?? 'X.Y.Z' }}.tar.gz --strip-components=1 \
-  --exclude='cfg.php' --exclude='cfg.local.php' \
-  --exclude='storage' --exclude='private' --exclude='log'
 php api/bin/migrate.php</code></pre>
         </template>
 
         <p class="text-xs text-neutral-500 mt-3">
-          <a href="/manual?ch=38_Aktualizace" target="_blank" rel="noopener" class="text-primary-600 hover:text-primary-800 hover:underline">
+          <a href="/manual?ch=40_Aktualizace" target="_blank" rel="noopener" class="text-primary-600 hover:text-primary-800 hover:underline">
             {{ t('updates.manual_link') }} →
           </a>
         </p>

@@ -126,7 +126,7 @@
 
 ## Pozitivní nálezy (co je dobré)
 
-- Server-side sessions (Redis + DB backup), 64-hex token, CSRF token v session, `hash_equals` pro CSRF i session.
+- Server-side sessions v autoritativní MariaDB, 64-hex token, CSRF token v session, `hash_equals` pro CSRF i session.
 - `PasswordHasher` (cost 12, pepper, dummyVerify proti enum, validate min/max length).
 - `BruteForceGuard` se 3 sliding windows + IPv4/24 a IPv6/64 normalizací (proti single-IP rotaci).
 - `IpMatcher` korektní CIDR pro IPv4 i IPv6, IPv4-mapped IPv6 normalizace.

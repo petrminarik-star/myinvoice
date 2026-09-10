@@ -9,6 +9,7 @@ use MyInvoice\Middleware\AuthMiddleware;
 use MyInvoice\Repository\TaxConstantsRepository;
 use MyInvoice\Service\ActivityLogger;
 use MyInvoice\Service\IpMatcher;
+use MyInvoice\Service\Tax\PausalSchedule;
 use MyInvoice\Service\Tax\TaxConstants;
 use Psr\Http\Message\ResponseInterface as Response;
 use Psr\Http\Message\ServerRequestInterface as Request;
@@ -48,7 +49,7 @@ final class TaxConstantsAction
         }
         $body = (array) ($request->getParsedBody() ?? []);
         $data = isset($body['data']) && is_array($body['data']) ? $body['data'] : $body;
-        $err = $this->validate($data);
+        $err = $this->validate($data, $year);
         if ($err !== null) {
             return Json::error($response, 'validation_failed', $err, 422);
         }
@@ -79,7 +80,7 @@ final class TaxConstantsAction
     }
 
     /** Minimální validace — povinné skalární klíče + struktura vnořených. */
-    private function validate(array $d): ?string
+    private function validate(array $d, int $year): ?string
     {
         $scalars = [
             'credit_taxpayer', 'credit_spouse', 'tax_rate_low', 'tax_rate_high', 'tax_high_threshold',
@@ -93,13 +94,55 @@ final class TaxConstantsAction
                 return "Chybí nebo není číslo: {$k}";
             }
         }
-        foreach (['pausal_annual', 'band_ceilings', 'expense_caps'] as $k) {
+        foreach (['band_ceilings', 'expense_caps'] as $k) {
             if (!isset($d[$k]) || !is_array($d[$k])) {
                 return "{$k} musí být objekt.";
             }
         }
         if (!isset($d['child_credits']) || !is_array($d['child_credits']) || $d['child_credits'] === []) {
             return 'child_credits musí být neprázdné pole.';
+        }
+        // Paušální daň: buď rozvrh měsíčních záloh (nově), nebo roční částky
+        // (starší klienti API — `pausal_annual` se pak bere doslova).
+        if (isset($d['pausal_monthly'])) {
+            return $this->validatePausalMonthly($d['pausal_monthly'], $year);
+        }
+        if (!isset($d['pausal_annual']) || !is_array($d['pausal_annual'])) {
+            return 'pausal_monthly (nebo alespoň pausal_annual) musí být objekt.';
+        }
+        return null;
+    }
+
+    /**
+     * Rozvrh měsíčních záloh: neprázdný seznam segmentů, první účinný k 1. 1.
+     * daného roku, data uvnitř roku, ostře rostoucí, vždy všechna tři pásma.
+     */
+    private function validatePausalMonthly(mixed $segments, int $year): ?string
+    {
+        if (!is_array($segments) || $segments === []) {
+            return 'pausal_monthly musí být neprázdný seznam období.';
+        }
+        $prev = null;
+        foreach (array_values($segments) as $i => $seg) {
+            if (!is_array($seg)) {
+                return 'pausal_monthly: každé období musí být objekt.';
+            }
+            $from = is_string($seg['from'] ?? null) ? trim((string) $seg['from']) : '';
+            if (!preg_match('/^\d{4}-\d{2}-01$/', $from) || substr($from, 0, 4) !== (string) $year) {
+                return "pausal_monthly: „od\" musí být 1. den měsíce roku {$year} (YYYY-MM-01).";
+            }
+            if ($i === 0 && $from !== sprintf('%04d-01-01', $year)) {
+                return 'pausal_monthly: první období musí začínat 1. ledna.';
+            }
+            if ($prev !== null && $from <= $prev) {
+                return 'pausal_monthly: období musí jít vzestupně a bez duplicit.';
+            }
+            foreach (PausalSchedule::BANDS as $band) {
+                if (!isset($seg[$band]) || !is_numeric($seg[$band]) || (float) $seg[$band] < 0) {
+                    return "pausal_monthly: chybí nebo je záporná měsíční záloha ({$band}) od {$from}.";
+                }
+            }
+            $prev = $from;
         }
         return null;
     }

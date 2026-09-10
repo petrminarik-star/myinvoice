@@ -30,7 +30,10 @@ final class TaxConstantsTest extends TestCase
     public function testVerified2026Values(): void
     {
         $c = TaxConstants::forYear(2026);
-        self::assertSame(119808, $c['pausal_annual']['band1']);  // 12× 9 984
+        // 6× 9 984 (led–čvn) + 6× 9 162 (čvc–pro, novela od 1. 7. 2026), NE 12× 9 984
+        self::assertSame(114876, $c['pausal_annual']['band1']);
+        self::assertSame(200940, $c['pausal_annual']['band2']);  // 12× 16 745 — beze změny
+        self::assertSame(325668, $c['pausal_annual']['band3']);  // 12× 27 139 — beze změny
         self::assertSame(1762812, $c['tax_high_threshold']);     // 36× prům. mzda 48 967
         self::assertSame(0.50, $c['health_assessment_pct']);
         self::assertSame(235044, $c['social_min_base_main']);    // 40 % × 48 967 × 12
@@ -48,5 +51,56 @@ final class TaxConstantsTest extends TestCase
         self::assertSame(2026, TaxConstants::forYear(9999)['year']);
         // Rok před začátkem tabulky → nejstarší známý.
         self::assertSame(2025, TaxConstants::forYear(2024)['year']);
+    }
+
+    /**
+     * Měsíční záloha paušální daně se může změnit uprostřed roku, roční částka je
+     * proto vždy dopočítaná z rozvrhu — nikdy uložený skalár.
+     */
+    public function testPausalScheduleDrivesAnnualAmount(): void
+    {
+        $c = TaxConstants::forYear(2026);
+        self::assertSame(
+            [
+                ['from' => '2026-01-01', 'band1' => 9984, 'band2' => 16745, 'band3' => 27139],
+                ['from' => '2026-07-01', 'band1' => 9162, 'band2' => 16745, 'band3' => 27139],
+            ],
+            $c['pausal_monthly']
+        );
+
+        // 2025: jediná sazba celý rok.
+        self::assertSame(
+            [['from' => '2025-01-01', 'band1' => 8716, 'band2' => 16745, 'band3' => 27139]],
+            TaxConstants::forYear(2025)['pausal_monthly']
+        );
+    }
+
+    /**
+     * Fallback na poslední známý rok nesmí zopakovat schod uprostřed roku — pro
+     * neznámý rok platí poslední známá sazba všech 12 měsíců.
+     */
+    public function testFallbackYearUsesLastKnownRateWholeYear(): void
+    {
+        $c = TaxConstants::forYear(2027);
+        self::assertSame(
+            [['from' => '2027-01-01', 'band1' => 9162, 'band2' => 16745, 'band3' => 27139]],
+            $c['pausal_monthly']
+        );
+        self::assertSame(109944, $c['pausal_annual']['band1']); // 12× 9 162
+    }
+
+    /**
+     * Legacy override (starší verze aplikace ukládala jen roční částky) si roční
+     * hodnotu ponechá doslova — dělení dvanácti nemusí vyjít na koruny.
+     */
+    public function testLegacyAnnualOnlyOverrideKeepsItsAmount(): void
+    {
+        $c = TaxConstants::withDerived(
+            ['year' => 2026, 'pausal_annual' => ['band1' => 100000, 'band2' => 200940, 'band3' => 325668]],
+            2026
+        );
+        self::assertSame(100000, $c['pausal_annual']['band1']);
+        self::assertSame(8333.33, $c['pausal_monthly'][0]['band1']);
+        self::assertSame('2026-01-01', $c['pausal_monthly'][0]['from']);
     }
 }

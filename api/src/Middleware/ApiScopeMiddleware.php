@@ -80,6 +80,8 @@ final class ApiScopeMiddleware implements MiddlewareInterface
         '#^/api/settings/supplier$#',
         '#^/api/settings/supplier/invoice-counter$#',
         '#^/api/settings/supplier/logo$#',
+        // Číselník ČINNOSTI (CZ-NACE) — read-only referenční data pro c_okec.
+        '#^/api/settings/nace-codes$#',
         '#^/api/settings/currencies(/|$)#',
         '#^/api/settings/vat-rates(/|$)#',
         '#^/api/settings/units(/|$)#',
